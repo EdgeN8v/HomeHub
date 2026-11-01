@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>约洗衣机</title>
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="/static/icon.svg">
+<meta name="theme-color" content="#0f766e">
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1c1e21; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #0f766e; --accent-text: #fff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111315; --card: #1b1e21; --text: #e8eaed; --muted: #9aa0a6; --line: #2c3035;
+            --accent: #14b8a6; --accent-text: #04201d; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: calc(var(--sat, 0px) + 16px) 16px calc(var(--sab, 0px) + 40px); }
+  /* same dusk sky as the home page, so the white status-bar icons stay readable */
+  body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(175deg, #7f86b5 0%, #a597b8 26%, #cfa9b1 52%, #e8cfc6 78%, #f1e4dd 100%); }
+  @media (prefers-color-scheme: dark) { body::before { background: linear-gradient(175deg, #1c1f33 0%, #2a2540 35%, #3a2b3c 70%, #2a2128 100%); } }
+  h1, h1 a { color: #fff !important; }
+  #foot, #app { color: rgba(255,255,255,.85) !important; }
+  h1 { font-size: 22px; margin: 4px 0 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
+  .drums { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .drum h2 { font-size: 15px; margin: 0 0 6px; color: var(--muted); font-weight: 600; }
+  .drum .state { font-size: 20px; font-weight: 700; }
+  .drum .sub { font-size: 13px; color: var(--muted); }
+  .drum .eta { font-size: 14px; margin-top: 4px; }
+  label.row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
+  .checks { display: flex; gap: 18px; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  input[type=time] { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+                     background: var(--bg); color: var(--text); }
+  input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
+  button { font: inherit; border: 0; border-radius: 12px; cursor: pointer; }
+  .primary { width: 100%; padding: 16px; font-size: 18px; font-weight: 700; background: var(--accent); color: var(--accent-text); margin-top: 6px; }
+  .primary:disabled { opacity: .6; }
+  .secondary { width: 100%; padding: 10px; margin-top: 8px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  #result:empty { display: none; }
+  .res-item { padding: 8px 0; border-top: 1px solid var(--line); }
+  .res-item:first-child { border-top: 0; padding-top: 0; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  ul { margin: 4px 0 0; padding-left: 20px; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .prog { font-size: 13px; color: var(--muted); padding: 2px 0 8px; }
+  .prog div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  .prog a { color: var(--accent); white-space: nowrap; }
+  .edit { border-top: 1px solid var(--line); padding: 8px 0; }
+  .edit label { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 14px; }
+  .edit select, .edit input[type=number] { font: inherit; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line);
+                                           background: var(--bg); color: var(--text); width: 9em; }
+  .edit .btns { display: flex; gap: 8px; margin-top: 6px; }
+  .edit .btns button { flex: 1; padding: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1><a href="/" style="color:inherit;text-decoration:none;margin-right:6px">‹</a>约洗衣机</h1>
+
+  <div class="drums">
+    <div class="card drum" id="d-upper"><h2>上桶</h2><div class="state">…</div></div>
+    <div class="card drum" id="d-lower"><h2>下桶</h2><div class="state">…</div></div>
+  </div>
+
+  <div class="card">
+    <label class="row"><span>几点前洗完</span><input type="time" id="finish" value="05:50"></label>
+    <div class="row checks" style="padding:8px 0">
+      <label><input type="checkbox" id="c-upper" checked>上桶</label>
+      <label><input type="checkbox" id="c-lower" checked>下桶</label>
+    </div>
+    <div class="prog" id="prog"></div>
+    <div id="prog-edit"></div>
+    <button class="primary" id="book">一键预约</button>
+    <button class="secondary" id="dry">只试算，不动洗衣机</button>
+  </div>
+
+  <div class="card" id="result"></div>
+
+  <div class="card">
+    <details>
+      <summary>洗衣记录（实际用时 vs 洗衣机预估）</summary>
+      <div id="runs" class="muted" style="margin-top:8px">加载中…</div>
+    </details>
+  </div>
+  <p class="muted" id="foot"></p>
+  <p class="muted" id="app"></p>
+</main>
+<script>
+if (window.HomeHubApp?.insetTop) { document.documentElement.style.setProperty("--sat", HomeHubApp.insetTop() + "px"); document.documentElement.style.setProperty("--sab", HomeHubApp.insetBottom() + "px"); }
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function drumCard(id, d) {
+  const eta = d.finish_eta ? `<div class="eta">预计 <b>${esc(d.finish_eta)}</b> 洗完</div>` : "";
+  const stage = d.run_status && d.run_status !== "未运行" ? ` · ${esc(d.run_status)}` : "";
+  $(id).innerHTML = `<h2>${esc(d.name)}</h2><div class="state">${esc(d.status)}</div>
+    <div class="sub">${esc(d.mode)}${stage}</div>${eta}`;
+}
+
+function runsTable(drums) {
+  let rows = [];
+  for (const d of Object.values(drums)) for (const r of d.runs) rows.push({...r, name: d.name});
+  rows.sort((a, b) => b.start.localeCompare(a.start));
+  if (!rows.length) return "还没有完整的记录。每次洗完都会自动记下来。";
+  const fmt = v => v == null ? "—" : v;
+  const over = v => v == null ? "—" : `<span class="${v > 0 ? "warn" : "ok"}">${v > 0 ? "+" : ""}${v}</span>`;
+  return `<table><tr><th>桶</th><th>开始</th><th>结束</th><th>用时</th><th>预估</th><th>偏差</th></tr>` +
+    rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.start)}</td><td>${fmt(r.end)}</td>
+      <td>${fmt(r.duration_min)}</td><td>${fmt(r.estimate_min)}</td><td>${over(r.overrun_min)}</td></tr>`).join("") +
+    `</table><p class="muted">单位：分钟。偏差 = 实际用时 − 洗衣机开始时的预估，预约时按最近 10 次里最大的偏差留余量。</p>`;
+}
+
+// X-HH-Body: the app relays requests and can't read bodies (see app.js withBody)
+async function postJSON(url, data) {
+  const body = JSON.stringify(data);
+  const r = await fetch(url, {method: "POST", body,
+    headers: {"Content-Type": "application/json", "X-HH-Body": btoa(String.fromCharCode(...new TextEncoder().encode(body)))}});
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+const DEGREE = {"Store": "收纳干", "Wear Immediately": "穿着即可", "Ironing": "熨烫干"};
+let last = null, editing = null;
+
+function progList(drums) {
+  $("#prog").innerHTML = ["upper", "lower"].map(d => `<div><span><b>${esc(drums[d].name)}自定义</b>：${esc(drums[d].program_summary)}</span>
+    <a href="#" data-edit="${d}">改</a></div>`).join("");
+}
+
+function progEditor() {
+  if (!editing || !last) { $("#prog-edit").innerHTML = ""; return; }
+  const d = last.drums[editing], p = d.program;
+  const field = (k, f) => {
+    if (f.kind === "select") return `<select data-k="${k}">${f.choices.map(c =>
+      `<option value="${esc(c)}"${String(p[k]) === c ? " selected" : ""}>${esc(DEGREE[c] || (k === "temp" && c !== "常温" ? c + "℃" : c))}</option>`).join("")}</select>`;
+    if (f.kind === "number") return `<input type="number" data-k="${k}" min="${f.choices[0]}" max="${f.choices[1]}" value="${esc(p[k])}">`;
+    return `<input type="checkbox" data-k="${k}"${p[k] ? " checked" : ""}>`;
+  };
+  $("#prog-edit").innerHTML = `<div class="edit"><div class="muted">${esc(d.name)}的自定义程序，和米家里设的保持一致。每次预约前会整套写进洗衣机。</div>` +
+    Object.entries(d.program_fields).map(([k, f]) => `<label><span>${esc(f.label)}</span>${field(k, f)}</label>`).join("") +
+    `<div class="btns"><button class="secondary" id="prog-cancel">取消</button><button class="primary" id="prog-save" style="margin:8px 0 0">保存</button></div></div>`;
+  $("#prog-cancel").onclick = () => { editing = null; progEditor(); };
+  $("#prog-save").onclick = async () => {
+    const program = {};
+    for (const el of $("#prog-edit").querySelectorAll("[data-k]"))
+      program[el.dataset.k] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
+    try {
+      await postJSON("/api/washer/program", {drum: editing, program});
+      editing = null; progEditor(); refresh();
+    } catch (e) { alert("保存失败：" + e.message); }
+  };
+}
+
+$("#prog").addEventListener("click", e => {
+  const a = e.target.closest("[data-edit]");
+  if (!a) return;
+  e.preventDefault();
+  editing = a.dataset.edit;
+  progEditor();
+});
+
+async function refresh() {
+  try {
+    const s = last = await (await fetch("/api/washer")).json();
+    progList(s.drums);
+    drumCard("#d-upper", s.drums.upper);
+    drumCard("#d-lower", s.drums.lower);
+    $("#runs").innerHTML = runsTable(s.drums);
+    $("#foot").textContent = `余量：上桶 ${s.drums.upper.buffer_min} 分钟，下桶 ${s.drums.lower.buffer_min} 分钟 · 更新于 ${new Date().toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit"})}`;
+  } catch (e) {
+    $("#foot").textContent = "连不上家里的服务：" + e;
+  }
+}
+
+function showResult(res, dry) {
+  $("#result").innerHTML = res.results.map(r => {
+    const p = r.plan || {};
+    const head = dry
+      ? `<b>${esc(r.name)}</b> 试算${r.ok ? "" : "：<span class='bad'>不能预约</span>"}`
+      : `<b>${esc(r.name)}</b> ${r.ok ? "<span class='ok'>已预约 ✓</span>" : "<span class='bad'>没约上</span>"}`;
+    const planLine = p.reservation_min != null
+      ? `<div>预计 ${esc(p.expected_start)} 开始，${esc(p.washer_finish)} 洗完（程序约 ${esc(r.booked_length_min || p.estimate_min)} 分钟，留 ${esc(p.buffer_min)} 分钟余量）</div>` : "";
+    const notes = (r.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+    return `<div class="res-item">${head}${planLine}${notes ? `<ul>${notes}</ul>` : ""}</div>`;
+  }).join("");
+}
+
+async function book(dry) {
+  const drums = ["upper", "lower"].filter(d => $("#c-" + d).checked);
+  if (!drums.length) { alert("至少选一个桶"); return; }
+  const btn = dry ? $("#dry") : $("#book");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = dry ? "试算中…" : "正在写程序并预约，约一分钟…";
+  try {
+    showResult(await postJSON("/api/washer/book", {drums, finish_by: $("#finish").value, dry_run: dry}), dry);
+  } catch (e) {
+    $("#result").innerHTML = `<span class="bad">出错了：${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+    refresh();
+  }
+}
+
+function syncLabel() { $("#book").textContent = `一键预约 · ${$("#finish").value} 前洗完`; }
+$("#finish").addEventListener("change", syncLabel);
+$("#book").addEventListener("click", () => book(false));
+$("#dry").addEventListener("click", () => book(true));
+// Inside the HomeHub Android app: show its version, route and an update button (native side does the work).
+if (window.HomeHubApp) {
+  $("#app").innerHTML = `App ${esc(HomeHubApp.versionName())} · ${esc(HomeHubApp.route())} · <a href="#" id="upd">检查更新</a>`;
+  $("#upd").addEventListener("click", e => { e.preventDefault(); HomeHubApp.checkUpdate(); });
+}
+syncLabel();
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

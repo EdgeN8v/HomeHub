@@ -1,0 +1,15 @@
+# HA 运行数据（含登录令牌、米家账号令牌）只在香橙派上，不要拷回仓库
+config/
+*.log
+.env
+secrets.yaml
+__pycache__/
+.pytest_cache/
+hub/certs/
+android/secrets.properties
+android/keystore.properties
+android/*.jks
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

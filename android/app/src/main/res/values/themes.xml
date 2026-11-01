@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.HomeHub" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">#0f766e</item>
+    </style>
+</resources>

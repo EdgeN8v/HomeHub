@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Updater downloads the new apk to cache/updates/ and hands it to the installer through this provider -->
+    <cache-path name="updates" path="updates/" />
+</paths>
