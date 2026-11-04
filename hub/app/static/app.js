@@ -214,7 +214,8 @@ function summary(d, short = false) {
   if (deviceOffline(d)) return { text: "离线" };
   if (k === "ac" || k === "heater") {
     const c = st(r.main);
-    if (c.s === "off") return { text: "已关闭" + (!short && c.a.current_temperature != null ? ` · 室温${fmtNum(c.a.current_temperature)}°` : "") };
+    const due = k === "ac" && S.model.ac_clean?.[r.main]?.due;
+    if (c.s === "off") return { text: due ? "已关闭 · 该清洁了" : "已关闭" + (!short && c.a.current_temperature != null ? ` · 室温${fmtNum(c.a.current_temperature)}°` : "") };
     const t = c.a.temperature != null ? ` ${fmtNum(c.a.temperature)}°` : "";
     return { text: `${HVAC[c.s] ?? c.s}${t}${c.a.preset_mode ? " · " + c.a.preset_mode : ""}` };
   }
@@ -285,9 +286,9 @@ function headerStats(room, devs = homeDevices()) {
   const alarms = devs.filter(d => ["smoke", "gas", "flood", "lock"].includes(d.kind)).filter(d => summary(d).warn);
   const guards = devs.filter(d => ["smoke", "gas", "flood"].includes(d.kind));
   const stats = [
-    avg("temperature") && `<div class="stat">${icon("thermo")}${avg("temperature")}°</div>`,
+    avg("temperature") && `<div class="stat tap" data-act="temps" role="button">${icon("thermo")}${avg("temperature")}°</div>`,
     avg("humidity") && `<div class="stat">${icon("humidifier")}${avg("humidity")}%</div>`,
-    `<div class="stat">${icon("light")}亮灯 ${lightsOn}</div>`,
+    `<div class="stat tap" data-act="lights" role="button">${icon("light")}亮灯 ${lightsOn}</div>`,
     guards.length && `<div class="stat ${alarms.length ? "warn" : ""}">${icon(alarms.length ? "alert" : "shield")}${alarms.length ? "有报警" : "安全"}</div>`,
   ].filter(Boolean).join("");
   const alertHtml = alarms.length
@@ -648,11 +649,129 @@ async function syncXiaomi(btn) {
 
 // ---- bottom sheet
 
-function sheet(html) {
+function sheet(html, cls = "") {
   closeSheet();
-  document.body.insertAdjacentHTML("beforeend", `<div id="sheet-mask" data-act="sheet-close"></div><div id="sheet">${html}</div>`);
+  document.body.insertAdjacentHTML("beforeend", `<div id="sheet-mask" data-act="sheet-close"></div><div id="sheet" class="${cls}">${html}</div>`);
 }
-function closeSheet() { $("#sheet")?.remove(); $("#sheet-mask")?.remove(); }
+// The big pop-ups close by pulling them down: the drag starts when the list is at its top and the finger moves down.
+(() => {
+  let y0 = 0, dy = 0, t0 = 0, on = false, el = null;
+  document.addEventListener("touchstart", e => {
+    el = e.target.closest("#sheet.big"); on = false; dy = 0;
+    if (el && e.touches.length === 1) { y0 = e.touches[0].clientY; t0 = Date.now(); }
+  }, { passive: true });
+  document.addEventListener("touchmove", e => {
+    if (!el) return;
+    const d = e.touches[0].clientY - y0;
+    if (!on && d > 6 && el.scrollTop <= 0) { on = true; el.style.animation = "none"; el.style.transition = "none"; y0 = e.touches[0].clientY; return; }
+    if (!on) return;
+    dy = Math.max(0, e.touches[0].clientY - y0);
+    el.style.transform = `translateY(${dy}px)`;
+    e.preventDefault();
+  }, { passive: false });
+  document.addEventListener("touchend", () => {
+    if (!el || !on) { el = null; return; }
+    const quick = dy / Math.max(1, Date.now() - t0) > 0.5;
+    if (dy > 110 || (quick && dy > 30)) {
+      el.style.transition = "transform .2s ease-in"; el.style.transform = "translateY(105%)";
+      const m = $("#sheet-mask"), e2 = el; if (m) { m.style.transition = "opacity .2s"; m.style.opacity = 0; }
+      setTimeout(() => { if ($("#sheet") === e2) closeSheet(); }, 200);
+    } else { el.style.transition = "transform .18s ease-out"; el.style.transform = ""; }
+    el = null; on = false;
+  });
+})();
+function closeSheet() { S.pop = null; $("#sheet")?.remove(); $("#sheet-mask")?.remove(); }
+
+// ---- 灯光 / 温度 pop-ups (the 亮灯 and temperature chips). Laid out like Mijia's: a big sheet, the rooms one
+// after another, white cards with a round power button, a tap on a card opens the device, a tap on the room
+// name (with its current temperature) jumps to that room.
+function popSheet(kind) {
+  sheet(popHtml(kind), "big");
+  S.pop = kind;     // sheet() closes any open sheet first, which clears the flag
+}
+function popHtml(kind) { return kind === "lights" ? lightsHtml() : tempHtml(); }
+function refreshPop() {
+  const el = $("#sheet");
+  if (!el) { S.pop = null; return; }
+  const y = el.scrollTop;
+  el.innerHTML = popHtml(S.pop);
+  el.scrollTop = y;
+}
+
+function popRooms(items) {
+  const home = S.model.homes.find(h => h.name === S.home) || { rooms: [] };
+  const names = [...home.rooms, ...new Set(items.map(i => i.room))].filter((r, i, a) => a.indexOf(r) === i);
+  return names.map(r => [r, items.filter(i => i.room === r)]).filter(([, l]) => l.length);
+}
+function scopedDevices() {
+  const devs = homeDevices();
+  return S.room === "全部" ? devs : devs.filter(d => d.room === S.room);
+}
+function thermoAvg(room) {
+  const t = homeDevices().filter(d => d.kind === "thermo" && d.room === room && num(d.roles.temperature) != null);
+  return t.length ? t.reduce((a, d) => a + num(d.roles.temperature), 0) / t.length : null;
+}
+function roomHead(room, right) {
+  return `<div class="m-room" data-room-jump="${esc(room)}" role="button"><span>${esc(room)}</span>${right ? `<span class="m-cur">${right}</span>` : ""}<i>${icon("caret")}</i></div>`;
+}
+
+function lightItems() {
+  const out = [];
+  for (const d of scopedDevices()) {
+    const lamps = d.kind === "light" ? [{ id: d.roles.main, name: d.name }]
+      : d.toggles.filter(t => /灯/.test(t.label)).map(t => ({ id: t.entity_id, name: d.toggles.length > 1 ? t.label : d.name }));
+    for (const l of lamps) out.push({ ...l, dev: d.id, room: d.room, offline: deviceOffline(d) });
+  }
+  return out;
+}
+
+function lightsHtml() {
+  const items = lightItems(), online = items.filter(l => !l.offline), on = online.filter(l => isOn(l.id)).length;
+  const card = l => {
+    const a = st(l.id).a, pct = isOn(l.id) && a.brightness != null ? Math.round(a.brightness / 2.55) + "%" : "";
+    return `<div class="mc ${l.offline ? "offline" : isOn(l.id) ? "active" : ""}" style="--c:#14c8a0" data-dev="${l.dev}" role="button">
+      ${l.offline ? "" : `<button class="pw ${isOn(l.id) ? "on" : ""}" data-toggle="${l.id}" aria-label="${esc(l.name)}">${icon("power")}</button>`}
+      <div class="pi">${icon("light")}</div>
+      <div class="mn">${esc(l.name)}</div><div class="ms">${esc(l.offline ? l.room + " | 离线" : [l.room, pct].filter(Boolean).join(" | "))}</div></div>`;
+  };
+  return `<div class="m-top"><div><h3>灯光</h3><div class="m-sub">${online.length ? `${on}个灯亮着` : "这里没有灯"}</div></div>
+      ${online.length ? `<button class="m-all ${on ? "off" : "on"}" data-act="${on ? "lights-off" : "lights-on"}">${icon("light")}${on ? "全部关闭" : "全部打开"}</button>` : ""}</div>
+    ${popRooms(items).map(([r, l]) => roomHead(r) + `<div class="m-grid">${l.map(card).join("")}</div>`).join("")}`;
+}
+
+function tempItems() {
+  return scopedDevices().filter(d => ["ac", "heater", "fan"].includes(d.kind)).map(d => ({ d, room: d.room }));
+}
+
+function tempHtml() {
+  const th = scopedDevices().filter(d => d.kind === "thermo" && num(d.roles.temperature) != null).map(d => num(d.roles.temperature));
+  const all = th.length ? th : homeDevices().filter(d => d.kind === "thermo" && num(d.roles.temperature) != null).map(d => num(d.roles.temperature));
+  const lo = all.length ? Math.min(...all) : null, hi = all.length ? Math.max(...all) : null;
+  const head = lo == null ? "—" : lo === hi ? `${lo.toFixed(1)}°` : `${lo.toFixed(1)} - ${hi.toFixed(1)}°`;
+  const card = ({ d }) => {
+    const off = deviceOffline(d), on = !off && isOn(d.roles.main), a = st(d.roles.main).a, tg = d.toggles[0];
+    const pwId = d.kind === "fan" ? (tg ? tg.entity_id : d.roles.main) : d.roles.main;
+    const power = off ? "" : `<button class="pw ${on ? "on" : ""}" data-toggle="${pwId}" aria-label="开关">${icon("power")}</button>`;
+    let ctl = "";
+    if (d.kind !== "fan") {
+      const step = a.target_temp_step || (d.kind === "ac" ? 1 : 0.5), has = a.temperature != null;
+      ctl = `<div class="m-temp ${on ? "" : "dim"}"><button class="m-pm" ${on && has ? "" : "disabled"} data-temp="${d.roles.main}" data-d="${-step}">−</button>
+        <div class="m-val">${has && !off ? fmtNum(a.temperature) + "<small>°</small>" : "--"}</div>
+        <button class="m-pm" ${on && has ? "" : "disabled"} data-temp="${d.roles.main}" data-d="${step}">+</button></div>`;
+    }
+    return `<div class="mw ${off ? "offline" : on ? "active" : ""}" style="--c:${COLORS[d.kind]}" data-dev="${d.id}" role="button">
+      <div class="mw-top"><div class="pi">${icon(d.kind)}</div><div class="mw-t"><div class="mn">${esc(d.name)}</div><div class="ms">${esc(d.room + (off ? " | 离线" : ""))}</div></div>${power}</div>${ctl}</div>`;
+  };
+  const items = tempItems(), rooms = popRooms(items);
+  return `<div class="m-top"><div><h3>${head}</h3><div class="m-sub">${S.room === "全部" ? "全屋温度" : esc(S.room) + "温度"}</div></div></div>
+    ${rooms.map(([r, l]) => { const t = thermoAvg(r); return roomHead(r, t == null ? "" : `当下${t.toFixed(1)}°`) + l.map(card).join(""); }).join("") || `<p class="sheet-note">这里没有空调或暖气</p>`}`;
+}
+
+function allLights(on) {
+  const todo = lightItems().filter(l => !l.offline && isOn(l.id) !== on);
+  todo.forEach(l => call(l.id, on ? "turn_on" : "turn_off", {}, { s: on ? "on" : "off" }));
+  if (todo.length) toast(`${on ? "打开" : "关闭"}了 ${todo.length} 盏灯`);
+}
 
 function roomList() {
   const home = S.model.homes.find(h => h.name === S.home) || { rooms: [] };
@@ -803,7 +922,7 @@ function card(d) {
     : tg.length === 1
     ? `<button class="pw ${isOn(tg[0].entity_id) ? "on" : ""}" data-toggle="${tg[0].entity_id}" aria-label="开关">${icon("power")}</button>`
     : tg.length > 1 ? `<div class="pws">${tg.map(t => `<button class="pw ${isOn(t.entity_id) ? "on" : ""}" data-toggle="${t.entity_id}" aria-label="${esc(t.label)}">${icon("power")}</button>`).join("")}</div>` : "";
-  const fill = d.kind === "washer" && window.washerCleanFill ? washerCleanFill() : "";
+  const fill = d.kind === "washer" && window.washerCleanFill ? washerCleanFill() : d.kind === "ac" && window.acCleanFill ? acCleanFill(d) : "";
   return `<div class="card ${active ? "active" : ""} ${off ? "offline" : ""}" style="--c:${COLORS[d.kind]}${fill}" data-dev="${d.id}" role="button">
       <div class="ico">${icon(d.kind)}</div>${btns}<div class="selmark">${icon("check")}</div>
       <div class="name ${[...d.name].length > 7 ? "long" : ""}">${esc(d.name)}</div>
@@ -844,8 +963,28 @@ function renderSmart() {
 
 // ---------------------------------------------------------------- detail page
 
+// ---------------------------------------------------------------- air conditioner page (Mijia layout)
+// Big number, one card of round buttons (power / mode / fan / 恒温), one card of the unit's own on-off
+// functions; everything else stays folded away under 更多设置.
+
+const comfortOf = id => (S.model.comfort || {})[id];
+function deskTemp(d) {
+  const t = S.model.devices.filter(x => x.kind === "thermo" && x.home === d.home && x.room === d.room && num(x.roles.temperature) != null);
+  return t.length ? t.reduce((n, x) => n + num(x.roles.temperature), 0) / t.length : null;
+}
+
+async function comfortSend(id, on, target) {
+  try {
+    const r = await api("/api/comfort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entity_id: id, on, target }) });
+    S.model.comfort = { ...(S.model.comfort || {}), [id]: r.comfort };
+    if (!on) delete S.model.comfort[id];
+    render();
+  } catch (e) { toast("恒温失败：" + e.message); }
+}
+
 function renderDetail(d) {
   if (d.kind === "washer" && window.renderWasher && wPrefix(d)) return renderWasher(d);   // washer_ui.js
+  if ((d.kind === "ac" || d.kind === "heater") && d.roles.main?.startsWith("climate.") && !deviceOffline(d) && !dead(st(d.roles.main).s)) return renderAc(d);
   const sm = summary(d, true), off = deviceOffline(d), active = !off && deviceActive(d);
   const main = d.toggles[0];
   let heroCtl = "";
@@ -1022,6 +1161,7 @@ function render() {
   if (tabs) { tabs.scrollLeft = tabsX; centerActiveTab(); placeIndicator(roomList().indexOf(S.room), false); }
   fitPager();
   markStuck();
+  if (S.pop) refreshPop();
 }
 
 // Tabs / title bar get a frosted background only once they stick to the top over the cards.
@@ -1079,7 +1219,7 @@ document.addEventListener("click", e => {
     const c = e.target.closest(".card[data-dev]");
     if (c && !e.target.closest("#edit-top,#edit-bottom,#sheet")) { toggleSelect(c.dataset.dev); return; }
   }
-  const t = e.target.closest("[data-toggle],[data-svc],[data-temp],[data-num],[data-room],[data-act],[data-dev]");
+  const t = e.target.closest("[data-toggle],[data-svc],[data-temp],[data-ctemp],[data-num],[data-room],[data-room-jump],[data-act],[data-dev]");
   if (!t) return;
   if (t.dataset.toggle) { e.stopPropagation(); toggle(t.dataset.toggle); return; }
   if (t.dataset.svc) {
@@ -1087,6 +1227,15 @@ document.addEventListener("click", e => {
     const data = key ? { [key]: v === "true" ? true : v === "false" ? false : v } : {};
     const opt = key === "hvac_mode" ? { s: v } : key === "option" ? { s: v } : key ? { a: { ...st(id).a, [key]: data[key] } } : null;
     call(id, svc, data, opt);
+    if (t.closest("#sheet")) closeSheet();
+    return;
+  }
+  if (t.dataset.ctemp) {
+    const id = t.dataset.ctemp, c = comfortOf(id), a = st(id).a;
+    if (!c) return;
+    const nv = Math.min(a.max_temp ?? 31, Math.max(a.min_temp ?? 16, c.target + parseFloat(t.dataset.d)));
+    S.model.comfort[id] = { ...c, target: nv }; render();
+    clearTimeout(S.ctT); S.ctT = setTimeout(() => comfortSend(id, true, nv), 600);
     return;
   }
   if (t.dataset.temp) {
@@ -1101,6 +1250,7 @@ document.addEventListener("click", e => {
     return;
   }
   if (t.dataset.room) { selectRoom(t.dataset.room); return; }
+  if (t.dataset.roomJump) { closeSheet(); selectRoom(t.dataset.roomJump); return; }
   const act = t.dataset.act;
   const arg = t.dataset.arg;
   if (act === "edit-done" || act === "edit-cancel") return exitEdit();
@@ -1124,6 +1274,14 @@ document.addEventListener("click", e => {
     else toast("请手动打开米家 App 添加设备");
     return;
   }
+  if (act === "comfort") {
+    if (st(arg).s === "off") return toast("先打开空调");
+    return comfortSend(arg, !comfortOf(arg)?.on);
+  }
+  if (act === "lights") return popSheet("lights");
+  if (act === "temps") return popSheet("temp");
+  if (act === "lights-on") return allLights(true);
+  if (act === "lights-off") return allLights(false);
   if (act === "nav-home") { if (isSmart()) location.hash = ""; return; }
   if (act === "nav-smart") { location.hash = "#/smart"; return; }
   if (act === "auto-toggle") {
@@ -1142,7 +1300,7 @@ document.addEventListener("click", e => {
     const hs = S.model.homes.map(h => h.name), i = hs.indexOf(S.home);
     S.home = hs[(i + 1) % hs.length]; S.room = "全部"; render(); return;
   }
-  if (t.dataset.dev) location.hash = "#/d/" + encodeURIComponent(t.dataset.dev);
+  if (t.dataset.dev) { closeSheet(); location.hash = "#/d/" + encodeURIComponent(t.dataset.dev); }
 });
 
 document.addEventListener("change", e => {

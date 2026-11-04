@@ -188,6 +188,13 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
             continue
         (more if r["noise"] else features).append({"entity_id": r["e"].entity_id, "label": r["label"]})
 
+    ac_x = {}
+    if kind in ("ac", "heater"):
+        for e in ents:
+            for key, suf in AC_EXTRA.items():
+                if e.entity_id.endswith(suf):
+                    ac_x[key] = e.entity_id
+
     room = area_name or ""
     home = ""
     if " " in room:
@@ -198,8 +205,23 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
         "features": features, "more": more, "events": events,
         # every entity's short label, for the automation editor ("厕所传感器 · 有人无人状态")
         "labels": {**{r["e"].entity_id: r["label"] for r in rows}, **{ev["entity_id"]: ev["label"] for ev in events}},
-        "entities": sorted({r["e"].entity_id for r in rows}),
+        "entities": sorted({r["e"].entity_id for r in rows} | set(ac_x.values())),
+        "ac": ac_x,
     }
+
+
+# Mijia's air-conditioner page uses these (MIoT siid/piid in the entity id); found by suffix so the
+# "* 增强" / text ones that the generic list hides are still reachable.
+AC_EXTRA = {
+    "eco": "_eco_p_2_7", "heater": "_heater_p_2_9", "sleep": "_sleep_mode_p_2_11", "sleep_diy": "_sleep_diy_p_10_4",
+    "favorite": "_favorite_on_p_2_19", "favorite_type": "_favorite_type_p_2_20", "sleep_state": "_sleep_state_p_10_38",
+    "wind_sw": "_wind_sensation_p_3_24", "wind_dir": "_wind_direction_p_3_11",
+    "vpos": "_vertical_position_p_3_25", "hpos": "_horizontal_position_p_3_26",
+    "timer": "_timer_p_10_3", "indicator": "_s_6_indicator_light", "alarm": "_alarm_p_5_1",
+    "filter_life": "_filter_life_level_p_21_1", "filter_type": "_filter_screen_type_p_2_38",
+    "kwh": "_power_consumption_p_20_1", "hours": "_running_duration_p_9_5", "fan_lever": "_realindoor_fan_lever_p_12_5",
+    "clean": "_clean_p_9_1",
+}
 
 
 UNASSIGNED = "未分配"

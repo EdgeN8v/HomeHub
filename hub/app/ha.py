@@ -94,6 +94,25 @@ class HA:
                     out.append((s["entity_id"], s["state"], s["last_changed"]))
             return out
 
+    async def history_series(self, start: datetime, entity_id: str, attr: str | None = None) -> list[tuple[datetime, float]]:
+        """(time, number) for every recorded change of one entity since start; the number is the state,
+        or an attribute of it when attr is given. Non-numeric states are skipped."""
+        params = {"filter_entity_id": entity_id, "significant_changes_only": "0",
+                  "end_time": datetime.now(start.tzinfo).isoformat()}
+        if not attr:
+            params["no_attributes"] = ""
+        async with self.session.get(f"{self.url}/api/history/period/{start.isoformat()}", params=params) as r:
+            r.raise_for_status()
+            data = await r.json()
+        out = []
+        for s in data[0] if data else []:
+            raw = s["attributes"].get(attr) if attr else s["state"]
+            try:
+                out.append((datetime.fromisoformat(s["last_updated"]), float(raw)))
+            except (TypeError, ValueError):
+                pass
+        return out
+
     async def ws_commands(self, types: list[str | dict]) -> dict[str, object]:
         """Run a few one-shot WebSocket commands (registries etc.) on a short-lived connection.
         A command is a type string, or a dict with "type" plus its fields; results are keyed by type."""

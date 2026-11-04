@@ -19,6 +19,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from .aclean import AcExtras
+from .comfort import Comfort
 from .ha import HA
 from .home_service import Home
 from .store import Store
@@ -81,6 +83,8 @@ async def home_snapshot(request: web.Request):
     # this phone's own order per room, falling back to the shared one for rooms it never rearranged
     snap["order"] = {**store.get_setting("card_order", {}), **(store.get_setting(f"card_order:{phone}", {}) if phone else {})}
     snap["hidden"] = store.get_setting("hidden_devices", [])
+    snap["comfort"] = request.app["comfort"].config()
+    snap["ac_clean"] = request.app["acx"].clean_all()
     resp = web.json_response(snap, dumps=_dumps)
     resp.enable_compression()   # ~180 KB of JSON -> a few dozen KB over 5G
     return resp
@@ -118,6 +122,51 @@ async def home_call(request: web.Request):
 
 def _dumps(o):
     return json.dumps(o, ensure_ascii=False)
+
+
+async def ac_history(request: web.Request):
+    """The air conditioner page's 室内环境 / 电量统计: the unit's room temperature over the last day, and the
+    per-day kWh and running hours HomeHub has been keeping (HA itself only holds ~10 days)."""
+    from datetime import timedelta, timezone
+    home = request.app["home"]
+    eid = request.query.get("entity_id")
+    dev = next((d for d in home.model["devices"] if d["roles"].get("main") == eid), None)
+    if not dev:
+        raise web.HTTPNotFound()
+    temps = await request.app["ha"].history_series(datetime.now(timezone.utc) - timedelta(hours=24), eid, "current_temperature")
+    return web.json_response({"temp": [[t.isoformat(), v] for t, v in temps], "daily": request.app["acx"].daily(eid)})
+
+
+async def ac_clean(request: web.Request):
+    """Self-clean of an air conditioner: "start" (the unit must be off), "stop", or "done" (mark a clean as
+    finished, e.g. one done from Mijia). The unit's protocol is described in aclean.py."""
+    body = await request.json()
+    acx, home, eid = request.app["acx"], request.app["home"], str(body.get("entity_id", ""))
+    dev = next((d for d in home.model["devices"] if d["roles"].get("main") == eid), None)
+    if not dev or not dev.get("ac", {}).get("clean"):
+        raise web.HTTPNotFound()
+    action = body.get("action")
+    if action == "done":
+        acx.mark_cleaned(eid)
+    elif action == "start":
+        if (home.states.get(eid) or {}).get("state") not in ("off",):
+            raise web.HTTPConflict(text="先把空调关掉，再开始自清洁")
+        await home.call(dev["ac"]["clean"], "set_value", {"value": "1"})
+    elif action == "stop":
+        await home.call(dev["ac"]["clean"], "set_value", {"value": "0"})
+    else:
+        raise web.HTTPBadRequest(text="unknown action")
+    return web.json_response({"ok": True, "ac_clean": acx.clean_all()})
+
+
+async def comfort_set(request: web.Request):
+    """一键恒温 on/off for an air conditioner, or a new desk target while it is on."""
+    body = await request.json()
+    try:
+        cfg = request.app["comfort"].set(str(body.get("entity_id", "")), bool(body.get("on")), body.get("target"))
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+    return web.json_response({"ok": True, "comfort": cfg})
 
 
 async def device_rename(request: web.Request):
@@ -319,10 +368,24 @@ async def on_startup(app: web.Application):
     washer = app["washer"] = Washer(ha, store)
     app["provision"] = Provisioner(store)
     home = app["home"] = Home(ha)
+    comfort = app["comfort"] = Comfort(home, store)
+    app["comfort_task"] = asyncio.create_task(comfort.run())
+    acx = app["acx"] = AcExtras(ha, home, store)
+
+    async def collect_loop():
+        await asyncio.sleep(60)
+        while True:
+            try:
+                await acx.collect()
+            except Exception:
+                logging.getLogger("aclean").exception("collecting daily numbers")
+            await asyncio.sleep(3600)
+    app["acx_task"] = asyncio.create_task(collect_loop())
 
     async def on_change(entity_id: str, new: dict):
         await washer.on_change(entity_id, new)
         await home.on_change(entity_id, new)
+        acx.note_change(entity_id, new)
 
     async def on_connect():
         await ha.wait_running()
@@ -334,6 +397,8 @@ async def on_startup(app: web.Application):
 
 async def on_cleanup(app: web.Application):
     app["listener"].cancel()
+    app["comfort_task"].cancel()
+    app["acx_task"].cancel()
     await app["ha"].close()
 
 
@@ -348,6 +413,9 @@ def make_app() -> web.Application:
         web.get("/api/states", home_states),
         web.post("/api/call", home_call),
         web.post("/api/order", save_order),
+        web.post("/api/comfort", comfort_set),
+        web.get("/api/ac/history", ac_history),
+        web.post("/api/ac/clean", ac_clean),
         web.post("/api/device/rename", device_rename),
         web.post("/api/device/move", device_move),
         web.post("/api/device/hide", device_hide),
