@@ -1500,3 +1500,16 @@ connect();
   document.addEventListener("touchend", finish);
   document.addEventListener("touchcancel", () => { on = false; pull = 0; if (!busyRefresh) reset(); });   // the browser took the gesture: no refresh
 })();
+
+// A pop-up with a text field: while the field has focus the sheet moves up to the top part of the screen, so the
+// keyboard (which the app's WebView does not shrink the page for) can never cover what is being typed.
+(() => {
+  let t = 0;
+  document.addEventListener("focusin", e => {
+    const sh = e.target.closest?.("#sheet");
+    if (!sh || !e.target.matches("input[type=text],input:not([type]),input[type=search],input[type=url],input[type=number],textarea")) return;
+    clearTimeout(t); sh.classList.add("kb");
+    setTimeout(() => e.target.scrollIntoView?.({ block: "center" }), 60);
+  });
+  document.addEventListener("focusout", () => { clearTimeout(t); t = setTimeout(() => $("#sheet")?.classList.remove("kb"), 350); });
+})();

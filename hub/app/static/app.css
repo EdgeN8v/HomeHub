@@ -1173,3 +1173,5 @@ html, body { overscroll-behavior-y: contain; }
 /* a card with several switches: smaller picture and buttons so they do not overlap */
 .card:has(.pws) .art { width: 42px; height: 42px; margin: 2px 0 0 0; }
 .card .pws .pw { width: 30px; height: 30px; } .card .pws .pw svg { width: 15px; height: 15px; } .card .pws { gap: 5px; }
+/* typing in a pop-up: sit in the upper part of the screen, above the keyboard */
+#sheet.kb { top: calc(var(--sat, 0px) + 9vh); bottom: auto; max-height: 42vh; animation: none; }
