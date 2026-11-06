@@ -20,6 +20,10 @@ const ICON_PATHS = {
   fridge: '<rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M6 10h12M9 6v2M9 13v3"/>',
   washer: '<rect x="4" y="2.5" width="16" height="19" rx="3"/><circle cx="12" cy="13.5" r="4.5"/><path d="M7.5 6h.01M10.5 6h.01"/>',
   dishwasher: '<rect x="4" y="2.5" width="16" height="19" rx="3"/><path d="M4 7.5h16M8 5h.01M8 12c1.3 1 2.7 1 4 0s2.7-1 4 0M8 16c1.3 1 2.7 1 4 0s2.7-1 4 0"/>',
+  fryer: '<path d="M5 8.5C5 5.5 8 4 12 4s7 1.5 7 4.5V17a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3zM5 9h14M19 13h2.2M12 6.6h.01M9 14.5h6"/>',
+  microwave: '<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><rect x="5" y="8.5" width="10" height="7" rx="1.2"/><path d="M18 9.5h.01M18 12h.01M18 14.5h.01"/>',
+  pressure_cooker: '<path d="M7 9h10a2 2 0 0 1 2 2v6a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-6a2 2 0 0 1 2-2zM8 9V7.5A1.5 1.5 0 0 1 9.5 6h5A1.5 1.5 0 0 1 16 7.5V9M12 6V4M10 4h4M4.5 12.5H3M21 12.5h-1.5"/>',
+  ihcooker: '<rect x="3" y="9" width="18" height="9" rx="2.5"/><circle cx="12" cy="13.5" r="3"/><path d="M6.5 6c0-1 1-1 1-2M12 6c0-1 1-1 1-2M17 6c0-1 1-1 1-2"/>',
   cooker: '<path d="M4 11h16v3a6 6 0 0 1-6 6h-4a6 6 0 0 1-6-6v-3zM2.5 11h19M9 7.5c0-1 1-1.5 1-2.5M13 7.5c0-1 1-1.5 1-2.5"/>',
   speaker: '<rect x="6" y="2.5" width="12" height="19" rx="6"/><circle cx="12" cy="14" r="3"/><path d="M12 7h.01"/>',
   treadmill: '<path d="M3 17h15l3-3M6 17l-1.5 3M17 17l1.5 3M16 6l2 8"/><circle cx="15.5" cy="4" r="1.5"/>',
@@ -48,3 +52,4 @@ const ICON_PATHS = {
 function icon(name) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ICON_PATHS.other}</svg>`;
 }
+

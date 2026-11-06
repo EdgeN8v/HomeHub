@@ -23,8 +23,8 @@ android {
         applicationId = "com.homehub.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 11
-        versionName = "2.0"
+        versionCode = 12
+        versionName = "2.1"
         for (k in listOf("lanUrl", "publicUrl", "token", "pin")) {
             buildConfigField("String", k.uppercase(), "\"${secrets.getProperty(k)}\"")
         }

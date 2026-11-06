@@ -132,7 +132,7 @@ class Comfort:
             return
         log.info("comfort %s: desk %.1f, target %.1f, set-point %.1f -> %.1f%s", entity_id, read, c["target"],
                  float(a["temperature"]), new, " (dark)" if dark else "")
-        await self.home.ha.call("climate", "set_temperature", {"entity_id": entity_id, "temperature": new})
+        await self.home._write(entity_id, "climate", "set_temperature", {"temperature": new})
         self.last[entity_id] = time.monotonic()
         self.last_change_ts[entity_id] = datetime.now(timezone.utc)
 

@@ -24,7 +24,7 @@ NOISE = ("提示音", "童锁", "物理控制锁", "指示灯", "防闪烁", "�
 DOMAIN_ORDER = {"switch": 0, "light": 0, "select": 1, "number": 2, "button": 3, "binary_sensor": 4, "sensor": 5}
 # Card order inside a room: what you use most first, infrastructure last.
 KIND_ORDER = ["ac", "heater", "light", "switch", "bath_heater", "fan", "humidifier", "water_heater", "plug", "lock",
-              "camera", "washer", "dishwasher", "cooker", "vacuum", "fridge", "speaker", "treadmill", "massager", "thermo",
+              "camera", "washer", "dishwasher", "fryer", "ihcooker", "pressure_cooker", "microwave", "cooker", "vacuum", "fridge", "speaker", "treadmill", "massager", "thermo",
               "presence", "contact", "flood", "smoke", "gas", "remote", "other", "gateway", "router"]
 SKIP_DOMAINS = {"event", "text", "notify", "update", "device_tracker", "tts", "conversation", "image"}
 
@@ -33,7 +33,7 @@ KIND_NAMES = {
     "humidifier": "加湿器", "water_heater": "热水器", "bath_heater": "浴霸", "lock": "门锁", "camera": "摄像机",
     "presence": "人体传感器", "contact": "门窗传感器", "flood": "水浸传感器", "smoke": "烟雾报警器",
     "gas": "燃气报警器", "thermo": "温湿度计", "fridge": "冰箱", "washer": "洗衣机", "dishwasher": "洗碗机",
-    "cooker": "厨房电器", "speaker": "音箱", "treadmill": "跑步机", "gateway": "网关", "router": "路由器",
+    "cooker": "厨房电器", "fryer": "空气炸锅", "microwave": "微波炉", "pressure_cooker": "压力锅", "ihcooker": "电磁炉", "speaker": "音箱", "treadmill": "跑步机", "gateway": "网关", "router": "路由器",
     "remote": "无线开关", "massager": "按摩仪", "vacuum": "扫地机", "other": "设备",
 }
 
@@ -89,7 +89,8 @@ def classify(model: str, ents: list[Ent]) -> str:
                       (".lock.", "lock"), (".camera.", "camera"), ("sensor_smoke", "smoke"), ("sensor_gas", "gas"),
                       (".fridge.", "fridge"), ("treadmill", "treadmill"), (".gateway.", "gateway"),
                       (".router.", "router"), (".remote.", "remote"), ("magic_touch", "massager"),
-                      ("sensor_ht", "thermo"), (".plug.", "plug")):
+                      ("sensor_ht", "thermo"), (".plug.", "plug"), (".fryer.", "fryer"), (".microwave.", "microwave"),
+                      (".pre_cooker.", "pressure_cooker"), (".ihcooker.", "ihcooker")):
         if key in m:
             return kind
     if "vacuum" in domains:
@@ -195,6 +196,12 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
                 if e.entity_id.endswith(suf):
                     ac_x[key] = e.entity_id
 
+    kx = {}
+    for key, suf in KITCHEN_EXTRA.get(kind, {}).items():
+        for e in ents:
+            if e.entity_id.endswith(suf):
+                kx[key] = e.entity_id
+
     room = area_name or ""
     home = ""
     if " " in room:
@@ -205,8 +212,8 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
         "features": features, "more": more, "events": events,
         # every entity's short label, for the automation editor ("厕所传感器 · 有人无人状态")
         "labels": {**{r["e"].entity_id: r["label"] for r in rows}, **{ev["entity_id"]: ev["label"] for ev in events}},
-        "entities": sorted({r["e"].entity_id for r in rows} | set(ac_x.values())),
-        "ac": ac_x,
+        "entities": sorted({r["e"].entity_id for r in rows} | set(ac_x.values()) | set(kx.values())),
+        "ac": ac_x, "kx": kx,
     }
 
 
@@ -221,6 +228,34 @@ AC_EXTRA = {
     "filter_life": "_filter_life_level_p_21_1", "filter_type": "_filter_screen_type_p_2_38",
     "kwh": "_power_consumption_p_20_1", "hours": "_running_duration_p_9_5", "fan_lever": "_realindoor_fan_lever_p_12_5",
     "clean": "_clean_p_9_1",
+}
+
+
+# The kitchen appliances' own properties (MIoT siid/piid in the entity id), found by suffix like the AC's.
+KITCHEN_EXTRA = {
+    "fryer": {
+        "mode": "_mode_p_2_8", "temp": "_target_temperature_p_2_4", "time": "_target_time_p_2_3", "weight": "_cooking_weight_p_2_18",
+        "portion": "_target_cooking_measure_p_2_13", "texture": "_texture_p_2_16", "flip": "_turn_pot_config_p_2_15",
+        "flip_now": "_turn_pot_p_2_14", "keep": "_auto_keep_warm_p_2_6", "keep_now": "_current_keep_warm_p_2_7",
+        "reserve": "_reservation_left_time_p_2_17", "status": "_status_p_2_1", "left": "_left_time_p_2_5", "fault": "_fault_p_2_2",
+        "start": "_start_cook_a_2_1", "stop": "_cancel_cooking_a_2_2", "pause": "_pause_a_2_3", "resume": "_resume_cook_a_2_4",
+        "recipe": "_recipe_name_p_2_11",
+    },
+    "microwave": {
+        "status": "_status_p_2_1", "left": "_left_time_p_2_5", "fault": "_fault_p_2_2", "mode": "_cook_mode_p_2_4", "heat": "_heat_level_p_2_6",
+        "time": "_target_time_p_2_7", "stop": "_cancel_cooking_a_2_2", "pause": "_pause_a_2_3", "resume": "_resume_cook_a_2_6",
+        "lock": "_physical_controls_locked_p_4_1", "beep": "_alarm_p_3_1", "volume": "_volume_p_3_2",
+    },
+    "pressure_cooker": {
+        "status": "_status_p_2_1", "left": "_left_time_p_2_5", "temp": "_temperature_p_2_7", "fault": "_fault_p_2_2",
+        "phase": "_press_status_p_5_8", "lid": "_cover_state_p_5_11", "taste": "_taste_p_5_2", "total": "_cook_time_p_5_9",
+        "stop": "_cancel_cooking_a_2_2", "push": "_finish_push_p_5_10",
+    },
+    "ihcooker": {
+        "status": "_status_p_2_1", "left": "_left_time_p_2_5", "worked": "_working_time_p_2_6", "fault": "_fault_p_2_2", "mode": "_cook_mode_p_2_8",
+        "temp": "_temperature_p_3_7", "target": "_target_temperature_p_3_8", "fire": "_fire_gears_p_3_9", "stop": "_cancel_cooking_a_2_2",
+        "pause": "_pause_a_2_3", "buzzer": "_buzzer_mark_p_3_25", "push": "_finish_push_p_3_24",
+    },
 }
 
 

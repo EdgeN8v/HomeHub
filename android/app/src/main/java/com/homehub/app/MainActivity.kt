@@ -69,6 +69,7 @@ class MainActivity : Activity() {
         // Open at once - the page and its last snapshot come from the phone (ShellCache, localStorage).
         // Requests start on the route that worked last time; the LAN / public probe runs meanwhile and
         // only changes where the relay sends them, the page itself stays.
+        Net.publicOverride = prefs.getString("public_url", null)
         prefs.getString("last_base", null)?.let { Net.assume(it) }
         loadHome()
         scope.launch {
@@ -278,6 +279,16 @@ class MainActivity : Activity() {
                 "udp" -> hotspot.udp(id, a.getString("host"), a.optInt("port", 54321), a.getString("hex"), a.optInt("timeout", 4000))
                 "leave" -> runOnUiThread { hotspot.leave(); web.evaluateJavascript("window.hhSetup && hhSetup(${JSONObject.quote(id)}, {\"ok\":true})", null) }
             }
+        }
+        /** The public address in use ("https://name:port"), and changing it: "" when saved, else the reason it was not. */
+        @JavascriptInterface fun publicUrl(): String = Net.publicUrl()
+        @JavascriptInterface fun setPublicUrl(input: String): String {
+            val reset = input.isBlank()
+            val url = if (reset) null else Net.normalizePublic(input) ?: return "这不是一个有效的地址，写成 域名 或 域名:端口"
+            getSharedPreferences("app", MODE_PRIVATE).edit().apply { if (url == null) remove("public_url") else putString("public_url", url) }.apply()
+            Net.publicOverride = url
+            runOnUiThread { scope.launch { rememberRoute(Net.baseUrl(force = true)); web.evaluateJavascript("window.connect && connect()", null) } }
+            return ""
         }
         @JavascriptInterface fun hasSetup(): Boolean = true
         @JavascriptInterface fun insetTop(): Float = insetTopCss

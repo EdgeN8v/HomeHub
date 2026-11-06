@@ -22,6 +22,7 @@ from aiohttp import web
 from .aclean import AcExtras
 from .comfort import Comfort
 from .ha import HA
+from .kitchen import Kitchen, TZ as KITCHEN_TZ
 from .home_service import Home
 from .store import Store
 from .provision import Provisioner
@@ -77,6 +78,8 @@ def _phone(value) -> str | None:
 
 
 async def home_snapshot(request: web.Request):
+    if request.query.get("fresh"):          # pull-to-refresh: rebuild the model from HA now (new devices, renames)
+        await request.app["home"].refresh()
     snap = await request.app["home"].snapshot()
     store = request.app["store"]
     phone = _phone(request.query.get("phone"))
@@ -85,6 +88,7 @@ async def home_snapshot(request: web.Request):
     snap["hidden"] = store.get_setting("hidden_devices", [])
     snap["comfort"] = request.app["comfort"].config()
     snap["ac_clean"] = request.app["acx"].clean_all()
+    snap["kitchen_resv"] = request.app["kitchen"].reservations()
     resp = web.json_response(snap, dumps=_dumps)
     resp.enable_compression()   # ~180 KB of JSON -> a few dozen KB over 5G
     return resp
@@ -116,6 +120,7 @@ async def home_stream(request: web.Request):
 
 async def home_call(request: web.Request):
     body = await request.json()
+    logging.getLogger("home").info("call %s %s %s", body.get("entity_id", ""), body.get("service", ""), body.get("data") or {})
     await request.app["home"].call(body.get("entity_id", ""), body.get("service", ""), body.get("data") or {})
     return web.json_response({"ok": True})
 
@@ -157,6 +162,25 @@ async def ac_clean(request: web.Request):
     else:
         raise web.HTTPBadRequest(text="unknown action")
     return web.json_response({"ok": True, "ac_clean": acx.clean_all()})
+
+
+async def kitchen_fryer(request: web.Request):
+    """Air fryer: {"device", "action": "start" | "reserve" | "cancel_resv", "params": {mode, temp, time, weight, keep, flip}, "at": "YYYY-MM-DDTHH:MM"}"""
+    body = await request.json()
+    k, device, params = request.app["kitchen"], str(body.get("device", "")), body.get("params") or {}
+    try:
+        if body.get("action") == "start":
+            await k.start_fryer(device, params)
+        elif body.get("action") == "reserve":
+            from datetime import datetime as _dt
+            k.reserve(device, _dt.fromisoformat(str(body.get("at"))).replace(tzinfo=KITCHEN_TZ), params)
+        elif body.get("action") == "cancel_resv":
+            k.cancel_reservation(device)
+        else:
+            raise ValueError("unknown action")
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+    return web.json_response({"ok": True, "kitchen_resv": k.reservations()})
 
 
 async def comfort_set(request: web.Request):
@@ -371,6 +395,8 @@ async def on_startup(app: web.Application):
     comfort = app["comfort"] = Comfort(home, store)
     app["comfort_task"] = asyncio.create_task(comfort.run())
     acx = app["acx"] = AcExtras(ha, home, store)
+    kitchen = app["kitchen"] = Kitchen(home, store)
+    app["kitchen_task"] = asyncio.create_task(kitchen.run())
 
     async def collect_loop():
         await asyncio.sleep(60)
@@ -399,6 +425,7 @@ async def on_cleanup(app: web.Application):
     app["listener"].cancel()
     app["comfort_task"].cancel()
     app["acx_task"].cancel()
+    app["kitchen_task"].cancel()
     await app["ha"].close()
 
 
@@ -416,6 +443,7 @@ def make_app() -> web.Application:
         web.post("/api/comfort", comfort_set),
         web.get("/api/ac/history", ac_history),
         web.post("/api/ac/clean", ac_clean),
+        web.post("/api/kitchen/fryer", kitchen_fryer),
         web.post("/api/device/rename", device_rename),
         web.post("/api/device/move", device_move),
         web.post("/api/device/hide", device_hide),

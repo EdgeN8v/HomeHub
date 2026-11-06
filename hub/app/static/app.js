@@ -7,7 +7,7 @@ const COLORS = {
   ac: "#2f80ed", heater: "#f2711c", light: "#f5a623", switch: "#14a38b", plug: "#14a38b", fan: "#2fb4d9",
   humidifier: "#2fb4d9", water_heater: "#f2711c", bath_heater: "#f2711c", lock: "#7c5cff", camera: "#5b6cff",
   presence: "#14a38b", contact: "#7c5cff", flood: "#2f80ed", smoke: "#e5484d", gas: "#f2711c", thermo: "#14a38b",
-  fridge: "#2f80ed", washer: "#2f80ed", dishwasher: "#2f80ed", cooker: "#f2711c", speaker: "#7c5cff",
+  fridge: "#2f80ed", washer: "#2f80ed", dishwasher: "#2f80ed", cooker: "#f2711c", fryer: "#f2711c", microwave: "#7c5cff", pressure_cooker: "#14a38b", ihcooker: "#e5484d", speaker: "#7c5cff",
   vacuum: "#14a38b", treadmill: "#14a38b", gateway: "#14a38b", router: "#14a38b", remote: "#14a38b", massager: "#7c5cff", other: "#14a38b",
 };
 const VACUUM = { docked: "已回充", cleaning: "清扫中", returning: "回充中", paused: "已暂停", idle: "待命", error: "出错了", unknown: "—" };
@@ -44,6 +44,9 @@ function apply(m) {
   S.model = m;
   S.states = m.states;
   S.byId = Object.fromEntries(m.devices.map(d => [d.id, d]));
+  // Offline devices sink to the bottom of their page - decided when the data is (re)loaded, not live, so cards
+  // don't jump around under a finger when something drops off for a moment.
+  S.offIds = new Set(m.devices.filter(deviceOffline).map(d => d.id));
   if (!S.home || !m.homes.find(h => h.name === S.home)) S.home = m.homes[0]?.name ?? "";
   render();
 }
@@ -60,8 +63,9 @@ const PHONE = (() => {
   } catch (e) { return ""; }
 })();
 
-async function load() {
-  const m = await api("/api/home" + (PHONE ? "?phone=" + encodeURIComponent(PHONE) : ""));
+async function load(fresh) {
+  const q = [PHONE ? "phone=" + encodeURIComponent(PHONE) : "", fresh ? "fresh=1" : ""].filter(Boolean).join("&");
+  const m = await api("/api/home" + (q ? "?" + q : ""));
   apply(m);
   try { localStorage.setItem("home-snapshot", JSON.stringify(m)); } catch (e) { /* storage full or disabled: just no instant start */ }
 }
@@ -160,6 +164,8 @@ function deviceOffline(d) {
   return ids.length > 0 && ids.every(id => dead(val(id)));
 }
 
+const KITCHEN_KINDS = { fryer: 1, microwave: 1, pressure_cooker: 1, ihcooker: 1 };
+
 function deviceActive(d) {
   if (d.toggles.length) return d.toggles.some(t => isOn(t.entity_id));
   const r = d.roles;
@@ -170,6 +176,7 @@ function deviceActive(d) {
   if (d.kind === "vacuum") return ["cleaning", "returning"].includes(val(r.main));
   if (d.kind === "washer") return busyStatus(washerStatus(d));   // both drums' own status, not the door sensor
   if (["dishwasher", "cooker", "treadmill", "massager"].includes(d.kind)) return busyStatus(val(r.status) ?? washerStatus(d));
+  if (d.kind in KITCHEN_KINDS) return !kIdle(kv(d, "status")) && !dead(kv(d, "status"));
   return false;
 }
 
@@ -219,6 +226,7 @@ function summary(d, short = false) {
     const t = c.a.temperature != null ? ` ${fmtNum(c.a.temperature)}°` : "";
     return { text: `${HVAC[c.s] ?? c.s}${t}${c.a.preset_mode ? " · " + c.a.preset_mode : ""}` };
   }
+  if (k in KITCHEN_KINDS && window.kitchenSummary) return { text: kitchenSummary(d) };
   if (k === "light") {
     const l = st(r.main);
     if (l.s !== "on") return { text: "已关闭" };
@@ -334,7 +342,8 @@ const allDevices = (devs, rooms) => rooms.flatMap(r => ordered(devs.filter(d => 
 
 function roomPage(room, devs, rooms) {
   const list = room === "全部" ? allDevices(devs, rooms) : devs.filter(d => d.room === room);
-  return (list.length ? `<div class="grid" data-order="${esc(orderKey(room))}">${ordered(list, room).map(card).join("")}</div>`
+  const offlineLast = ds => [...ds.filter(d => !S.offIds?.has(d.id)), ...ds.filter(d => S.offIds?.has(d.id))];
+  return (list.length ? `<div class="grid" data-order="${esc(orderKey(room))}">${offlineLast(ordered(list, room)).map(card).join("")}</div>`
                       : `<div class="empty">这个房间还没有设备</div>`)
     + ((S.model.hidden || []).length && room === "全部"
       ? `<div class="foot"><a href="#" data-act="show-hidden">已删除的设备（${S.model.hidden.length}）</a></div>` : "");
@@ -453,7 +462,7 @@ document.addEventListener("touchcancel", endTouch);
 
 function endTouch() {
   clearTimeout(drag.timer); drag.timer = 0;
-  if (drag.pending && !drag.active) scheduleRender();   // catch up on updates held back while the finger was down
+  if (drag.pending && !drag.active && S.stale) scheduleRender();   // catch up on updates held back while the finger was down - only if there were any
   drag.pending = null;
   if (!drag.active) return;
   cancelAnimationFrame(drag.raf);
@@ -558,6 +567,13 @@ const FOUND_KINDS = { homekit_controller: "HomeKit 设备，可走局域网", ip
   roborock: "石头扫地机", nut: "UPS 不间断电源", esphome: "自研设备（ESPHome）", matter: "Matter 设备", zha: "Zigbee 接收棒",
   cast: "投屏设备", yeelight: "Yeelight 灯", xiaomi_miio: "小米设备（局域网）", tuya: "涂鸦设备", midea_ac_lan: "美的设备" };
 
+function publicAddressSheet() {
+  sheet(`<h3>公网地址</h3>
+    <p class="sheet-note" style="text-align:left">不在家时 App 用这个地址连家里。写域名就行，端口不写就沿用现在的；改完会马上重新测一次连不连得上。</p>
+    <input id="pubin" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" value="${esc(HomeHubApp.publicUrl().replace("https://", ""))}" style="margin-top:12px">
+    <div class="sheet-btns"><button data-act="pub-reset">恢复默认</button><button class="pri" data-act="pub-save">保存</button></div>`);
+}
+
 async function addDeviceSheet() {
   sheet(`<h3>添加设备</h3>
     <div class="add-sec"><div class="add-t">米家设备</div>
@@ -568,7 +584,8 @@ async function addDeviceSheet() {
       <p class="sheet-note">新买的或刚复位的小米 Wi-Fi 设备（灯、插座、净化器…），直接在这里配网。</p>
       <div class="sheet-btns"><button class="pri" data-act="prov-start">开始配网</button></div></div>
     ${window.HomeHubApp ? `<div class="add-sec"><div class="add-t">应用</div>
-      <div class="sheet-row"><span>HomeHub ${esc(HomeHubApp.versionName())}<small>线路：${esc(HomeHubApp.route())}</small></span><button data-act="update">检查更新</button></div></div>` : ""}
+      <div class="sheet-row"><span>HomeHub ${esc(HomeHubApp.versionName())}<small>线路：${esc(HomeHubApp.route())}</small></span><button data-act="update">检查更新</button></div>
+      ${HomeHubApp.publicUrl ? `<div class="sheet-row"><span>公网地址<small>${esc(HomeHubApp.publicUrl().replace("https://", ""))}</small></span><button data-act="pub-edit">修改</button></div>` : ""}</div>` : ""}
     <div class="add-sec"><div class="add-t">Zigbee / Matter 设备</div>
       <p class="sheet-note">还没启用：需要香橙派插上 Zigbee 接收棒，或装好 Matter 服务。买了这类设备告诉 Claude 来开通。</p></div>`);
   try {
@@ -731,7 +748,7 @@ function lightsHtml() {
     const a = st(l.id).a, pct = isOn(l.id) && a.brightness != null ? Math.round(a.brightness / 2.55) + "%" : "";
     return `<div class="mc ${l.offline ? "offline" : isOn(l.id) ? "active" : ""}" style="--c:#14c8a0" data-dev="${l.dev}" role="button">
       ${l.offline ? "" : `<button class="pw ${isOn(l.id) ? "on" : ""}" data-toggle="${l.id}" aria-label="${esc(l.name)}">${icon("power")}</button>`}
-      <div class="pi">${icon("light")}</div>
+      <div class="pi art">${(window.deviceArt && deviceArt(S.byId[l.dev])) || icon("light")}</div>
       <div class="mn">${esc(l.name)}</div><div class="ms">${esc(l.offline ? l.room + " | 离线" : [l.room, pct].filter(Boolean).join(" | "))}</div></div>`;
   };
   return `<div class="m-top"><div><h3>灯光</h3><div class="m-sub">${online.length ? `${on}个灯亮着` : "这里没有灯"}</div></div>
@@ -760,7 +777,7 @@ function tempHtml() {
         <button class="m-pm" ${on && has ? "" : "disabled"} data-temp="${d.roles.main}" data-d="${step}">+</button></div>`;
     }
     return `<div class="mw ${off ? "offline" : on ? "active" : ""}" style="--c:${COLORS[d.kind]}" data-dev="${d.id}" role="button">
-      <div class="mw-top"><div class="pi">${icon(d.kind)}</div><div class="mw-t"><div class="mn">${esc(d.name)}</div><div class="ms">${esc(d.room + (off ? " | 离线" : ""))}</div></div>${power}</div>${ctl}</div>`;
+      <div class="mw-top"><div class="pi art">${(window.deviceArt && deviceArt(d)) || icon(d.kind)}</div><div class="mw-t"><div class="mn">${esc(d.name)}</div><div class="ms">${esc(d.room + (off ? " | 离线" : ""))}</div></div>${power}</div>${ctl}</div>`;
   };
   const items = tempItems(), rooms = popRooms(items);
   return `<div class="m-top"><div><h3>${head}</h3><div class="m-sub">${S.room === "全部" ? "全屋温度" : esc(S.room) + "温度"}</div></div></div>
@@ -785,7 +802,7 @@ function roomList() {
 // The pager is as tall as the current page; when the list has been scrolled down, the other pages
 // are shifted so their top sits just under the sticky tabs, where the eye already is.
 
-const pager = { moving: false, prepared: false, w: 0, i: 0, lift: 0 };
+const pager = { moving: false, w: 0, lift: 0, raf: 0, gen: 0, prepared: false };
 
 // The pager's height follows the current page (otherwise a long "全部" leaves empty space under short rooms).
 function fitPager() {
@@ -793,25 +810,37 @@ function fitPager() {
   if (p && cur) p.style.height = cur.offsetHeight + "px";
 }
 
+// How far the lift is: when the list has been scrolled down, the pages that are not current sit just under
+// the sticky tabs, where the eye already is. Called at every touch start - it is cheap.
 function preparePager() {
   const p = $(".pager"), tabs = $(".tabs");
   if (!p) return false;
   pager.w = p.clientWidth;
-  pager.i = roomList().indexOf(S.room);
   const lift = pager.lift = Math.max(0, (tabs ? tabs.getBoundingClientRect().bottom : 0) - p.getBoundingClientRect().top);
   document.querySelectorAll(".roomview:not(.cur)").forEach(v => { v.style.transform = lift ? `translateY(${lift}px)` : ""; });
   pager.prepared = true;
   return true;
 }
 
-function slideTrack(x, animate) {
-  const t = $(".track");
-  t.style.transition = animate ? "transform .34s cubic-bezier(.2, .8, .25, 1)" : "none";
-  t.style.transform = `translateX(${x}px)`;
+function centerActiveTab() {
+  const tabs = $(".tabs"), on = $(".tab.on");
+  if (tabs && on) tabs.scrollTo({ left: on.offsetLeft - tabs.clientWidth / 2 + on.clientWidth / 2, behavior: "smooth" });
 }
 
-// The white bar under the room tabs is a single element: it slides between tabs, following the finger
-// mid-swipe (pos is a fractional tab index), instead of jumping once the new room has rendered.
+// ---- one source of truth: the strip's x position. Every frame sets the strip AND the tab bar from it, so they can
+// never disagree; the animation is a plain requestAnimationFrame loop with a token, so an old one can never
+// finish after a newer one has started.
+const stripX = () => { const t = $(".track"); return t ? new DOMMatrixReadOnly(getComputedStyle(t).transform).m41 : 0; };
+function setStrip(x) {
+  const t = $(".track");
+  if (!t) return;
+  t.style.transition = "none";
+  t.style.transform = `translate3d(${x}px, 0, 0)`;
+  placeIndicator(-x / pager.w, false);               // the white bar under the tabs follows along
+}
+function stopAnim() { cancelAnimationFrame(pager.raf); pager.gen++; pager.moving = false; }
+
+// The white bar under the room tabs is a single element: it follows the strip (pos is a fractional tab index).
 function tabCenter(i) {
   const t = document.querySelectorAll(".tab")[i];
   return t ? t.offsetLeft + t.offsetWidth / 2 : 0;
@@ -830,82 +859,117 @@ function highlightTab(j) {
   if (tabs && on) tabs.scrollTo({ left: on.offsetLeft - tabs.clientWidth / 2 + on.clientWidth / 2, behavior: "smooth" });
 }
 
-// Slide to page j, then make it the current room. The tab highlight, the bar and the header numbers
-// switch the moment the finger lifts - only the device pages take the slide's time.
-function settle(j) {
+// Making room j current is only bookkeeping - no re-render, so nothing on screen jumps. Idempotent.
+function commitRoom(j) {
+  const l = roomList(), room = l[j];
+  if (!room || room === S.room) return;
+  const pg = $(".pager"), lift = pager.lift;
+  const anchor = pg.getBoundingClientRect().top + lift;   // where the new room's (lifted) top is on screen now
+  S.room = room;
+  document.querySelectorAll(".roomview").forEach((v, k) => { v.classList.toggle("cur", k === j); v.style.transform = ""; });
+  fitPager();
+  const now = pg.getBoundingClientRect().top;
+  if (lift) window.scrollBy(0, now - anchor);             // take the lift off without the page moving
+  const statsEl = $(".stats");
+  if (statsEl) statsEl.innerHTML = headerStats(room).stats;
+  highlightTab(j);
+}
+
+// Glide to page j from wherever the strip is now. v0: the finger's speed (px/ms) for a natural carry-over.
+function animateTo(j, v0 = 0) {
   const l = roomList();
   j = Math.max(0, Math.min(l.length - 1, j));
+  stopAnim();
+  const gen = pager.gen, from = stripX(), to = -j * pager.w, dist = to - from;
   pager.moving = true;
-  slideTrack(-j * pager.w, true);
   highlightTab(j);
-  placeIndicator(j, true);
   const statsEl = $(".stats");
   if (statsEl && l[j] !== S.room) statsEl.innerHTML = headerStats(l[j]).stats;
-  let done = false;
   const finish = () => {
-    if (done) return; done = true;
-    pager.moving = false; pager.prepared = false;
-    if (l[j] !== S.room) {
-      // Where the new room's top is on screen right now (lifted under the sticky tabs, or not lifted):
-      // after re-rendering, scroll so it stays exactly there - nothing on screen moves.
-      const anchor = $(".pager").getBoundingClientRect().top + pager.lift;
-      S.room = l[j];
-      render();
-      const now = $(".pager")?.getBoundingClientRect().top;
-      if (now != null && pager.lift) window.scrollBy(0, now - anchor);
-    } else {
-      document.querySelectorAll(".roomview").forEach(v => { v.style.transform = ""; });
-      $(".track").style.transform = `translateX(${-j * 100}%)`;
-      scheduleRender();   // catch up on state changes held back meanwhile
-    }
+    if (gen !== pager.gen) return;
+    pager.moving = false;
+    setStrip(to);
+    commitRoom(j);
+    preparePager();                                         // lifts for the pages that are not current now
+    if (S.stale) { S.stale = false; scheduleRender(); }     // catch up on state changes held back meanwhile
   };
-  $(".track").addEventListener("transitionend", finish, { once: true });
-  setTimeout(finish, 450);   // in case transitionend never fires (no movement needed)
+  if (Math.abs(dist) < 0.5) return finish();
+  const dur = Math.max(160, Math.min(320, Math.abs(dist) / pager.w * 360 + 90 - Math.min(80, Math.abs(v0) * 60)));
+  const t0 = performance.now();
+  const step = now => {
+    if (gen !== pager.gen) return;
+    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);     // ease-out: fast start, soft landing
+    setStrip(from + dist * e);
+    if (p < 1) pager.raf = requestAnimationFrame(step); else finish();
+  };
+  pager.raf = requestAnimationFrame(step);
+}
+
+// Taking over a slide that is still running: freeze where it is, make the room it was heading for current.
+function interruptPager() {
+  const x = stripX();
+  const heading = Math.round(-x / pager.w);                 // the page the strip is closest to
+  stopAnim();
+  setStrip(x);
+  commitRoom(Math.max(0, Math.min(roomList().length - 1, heading)));
+  preparePager();
 }
 
 function selectRoom(room) {
-  if (room === S.room || pager.moving) return;
+  const j = roomList().indexOf(room);
+  if (j < 0) return;
   if (!preparePager()) { S.room = room; render(); return; }
-  settle(roomList().indexOf(room));
+  if (pager.moving) interruptPager();
+  if (room === S.room && Math.abs(stripX() + j * pager.w) < 1) return;
+  animateTo(j);
 }
 
-function centerActiveTab() {
-  const tabs = $(".tabs"), on = $(".tab.on");
-  if (tabs && on) tabs.scrollTo({ left: on.offsetLeft - tabs.clientWidth / 2 + on.clientWidth / 2, behavior: "smooth" });
-}
-
-const swipe = { x: 0, y: 0, t: 0, axis: null, lastX: 0, lastT: 0, vx: 0 };
+// ---- finger: 1:1 follow, rubber band past the ends, fling to the next room
+const swipe = { x: 0, y: 0, t: 0, axis: null, lastX: 0, lastT: 0, vx: 0, base: 0 };
 document.addEventListener("touchstart", e => {
   swipe.axis = null;
-  if (S.edit || pager.moving || isSmart() || isAuto() || currentDevice() || e.touches.length !== 1 || e.target.closest(".tabs,.stats,input,select")) { swipe.t = 0; return; }
+  if (S.edit || isSmart() || isAuto() || currentDevice() || e.touches.length !== 1 || e.target.closest(".tabs,.stats,input,select") || !$(".pager")) { swipe.t = 0; return; }
+  preparePager();
+  if (pager.moving) interruptPager();
+  swipe.base = stripX();
   swipe.x = swipe.lastX = e.touches[0].clientX; swipe.y = e.touches[0].clientY; swipe.t = swipe.lastT = Date.now(); swipe.vx = 0;
 }, { passive: true });
 
 document.addEventListener("touchmove", e => {
   if (!swipe.t) return;
   const x = e.touches[0].clientX, dx = x - swipe.x, dy = e.touches[0].clientY - swipe.y, now = Date.now();
-  if (!swipe.axis && Math.hypot(dx, dy) > 10) {
+  if (!swipe.axis && Math.hypot(dx, dy) > 6) {
     swipe.axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? "x" : "y";
-    if (swipe.axis === "x") { clearTimeout(drag.timer); drag.timer = 0; preparePager(); }   // a swipe, not a long press
+    if (swipe.axis === "x") { clearTimeout(drag.timer); drag.timer = 0; }     // a swipe, not a long press
   }
-  if (swipe.axis !== "x" || !pager.prepared) return;
-  if (now > swipe.lastT) { swipe.vx = (x - swipe.lastX) / (now - swipe.lastT); swipe.lastX = x; swipe.lastT = now; }
-  const last = roomList().length - 1;
-  const edge = (dx > 0 && pager.i === 0) || (dx < 0 && pager.i === last);
-  slideTrack(-pager.i * pager.w + (edge ? dx * .3 : dx), false);   // 1:1 with the finger, rubber band past the ends
-  placeIndicator(pager.i - dx / pager.w, false);                     // the tab bar follows along
+  if (swipe.axis !== "x") return;
+  if (now > swipe.lastT) { swipe.vx = swipe.vx * .4 + .6 * (x - swipe.lastX) / (now - swipe.lastT); swipe.lastX = x; swipe.lastT = now; }
+  const last = roomList().length - 1, min = -last * pager.w;
+  let nx = swipe.base + dx;
+  if (nx > 0) nx *= .3; else if (nx < min) nx = min + (nx - min) * .3;       // rubber band past the ends
+  setStrip(nx);
 }, { passive: true });
 
-document.addEventListener("touchend", e => {
+function endSwipe() {
   if (!swipe.t) return;
-  const dx = e.changedTouches[0].clientX - swipe.x;
-  const wasX = swipe.axis === "x" && pager.prepared;
+  const wasX = swipe.axis === "x";
   swipe.t = 0;
-  if (!wasX) return;
-  const fling = Math.abs(swipe.vx) > .35 && Math.abs(dx) > 20;
-  const go = Math.abs(dx) > pager.w * .25 || fling;
-  settle(go ? pager.i + (dx < 0 ? 1 : -1) : pager.i);
-}, { passive: true });
+  const x = stripX(), last = roomList().length - 1;
+  if (!wasX) {                                              // a tap, or a vertical scroll: if the strip is mid-way, let it land
+    if (Math.abs(x + Math.round(-x / pager.w) * pager.w) > 1) animateTo(Math.round(-x / pager.w));
+    return;
+  }
+  const f = -x / pager.w;                                   // fractional page now
+  const v = swipe.vx;                                       // px/ms, negative = towards the next room
+  let j;
+  if (Math.abs(v) > .3) j = v < 0 ? Math.ceil(f - 0.001) : Math.floor(f + 0.001);          // a fling goes one page on
+  else j = Math.round(f);
+  const from = Math.round(swipe.base / -pager.w);           // never skip more than one page from where the finger started
+  j = Math.max(from - 1, Math.min(from + 1, j));
+  animateTo(Math.max(0, Math.min(last, j)), v);
+}
+document.addEventListener("touchend", endSwipe, { passive: true });
+document.addEventListener("touchcancel", endSwipe, { passive: true });
 
 const WEATHER = { sunny: "☀️", "clear-night": "🌙", partlycloudy: "⛅", cloudy: "☁️", fog: "🌫️", rainy: "🌧️", pouring: "🌧️",
                   lightning: "⛈️", "lightning-rainy": "⛈️", snowy: "❄️", "snowy-rainy": "🌨️", hail: "🌨️", windy: "🍃", "windy-variant": "🍃", exceptional: "⚠️" };
@@ -924,7 +988,7 @@ function card(d) {
     : tg.length > 1 ? `<div class="pws">${tg.map(t => `<button class="pw ${isOn(t.entity_id) ? "on" : ""}" data-toggle="${t.entity_id}" aria-label="${esc(t.label)}">${icon("power")}</button>`).join("")}</div>` : "";
   const fill = d.kind === "washer" && window.washerCleanFill ? washerCleanFill() : d.kind === "ac" && window.acCleanFill ? acCleanFill(d) : "";
   return `<div class="card ${active ? "active" : ""} ${off ? "offline" : ""}" style="--c:${COLORS[d.kind]}${fill}" data-dev="${d.id}" role="button">
-      <div class="ico">${icon(d.kind)}</div>${btns}<div class="selmark">${icon("check")}</div>
+      ${window.deviceArt && deviceArt(d) ? `<div class="art">${deviceArt(d)}</div>` : `<div class="ico">${icon(d.kind)}</div>`}${btns}<div class="selmark">${icon("check")}</div>
       <div class="name ${[...d.name].length > 7 ? "long" : ""}">${esc(d.name)}</div>
       <div class="st ${sm.warn ? "warn" : ""}">${esc(sm.text)}</div>
     </div>`;
@@ -984,6 +1048,7 @@ async function comfortSend(id, on, target) {
 
 function renderDetail(d) {
   if (d.kind === "washer" && window.renderWasher && wPrefix(d)) return renderWasher(d);   // washer_ui.js
+  if (d.kind in KITCHEN_KINDS && d.kx && !deviceOffline(d) && window.renderKitchen) return renderKitchen(d);   // kitchen_ui.js
   if ((d.kind === "ac" || d.kind === "heater") && d.roles.main?.startsWith("climate.") && !deviceOffline(d) && !dead(st(d.roles.main).s)) return renderAc(d);
   const sm = summary(d, true), off = deviceOffline(d), active = !off && deviceActive(d);
   const main = d.toggles[0];
@@ -1000,7 +1065,7 @@ function renderDetail(d) {
       <div class="bar"><button class="back" data-act="back">${icon("back")}</button>
         <div><div class="t">${esc(d.name)}</div><div class="r">${esc([d.room, d.kind_name].filter(Boolean).join(" · "))}</div></div></div>
       <div class="hero ${active ? "active" : ""}">
-        <div class="big-ico">${icon(d.kind)}</div>
+        ${window.deviceArt && deviceArt(d) ? `<div class="big-ico art">${deviceArt(d)}</div>` : `<div class="big-ico">${icon(d.kind)}</div>`}
         <div class="state" style="${sm.warn ? "color:var(--danger)" : ""}">${esc(sm.text)}</div>
         <div class="state-sub">${esc(heroSub(d))}</div>
         ${heroCtl}
@@ -1146,7 +1211,8 @@ function currentDevice() {
 
 function render() {
   // never redraw under a finger that is on a card (long press pending) or carrying one
-  if (!S.model || busy || drag.active || drag.pending || pager.moving || (swipe.t && swipe.axis === "x")) return;
+  if (!S.model || busy || drag.active || drag.pending || pager.moving || (swipe.t && swipe.axis === "x")) { if (S.model) S.stale = true; return; }   // held back: whoever lifts the hold catches up
+  S.stale = false;
   const y = window.scrollY, tabsX = $(".tabs")?.scrollLeft ?? 0;
   if (isAuto()) {   // the editor redraws itself; live updates must not wipe what is being typed
     if (!S.ed || S.ed.target !== autoTarget()) openAuto();
@@ -1278,6 +1344,14 @@ document.addEventListener("click", e => {
     if (st(arg).s === "off") return toast("先打开空调");
     return comfortSend(arg, !comfortOf(arg)?.on);
   }
+  if (act === "pub-edit") return publicAddressSheet();
+  if (act === "pub-save" || act === "pub-reset") {
+    const v = act === "pub-reset" ? "" : ($("#pubin")?.value || "");
+    const err = HomeHubApp.setPublicUrl(v);
+    if (err) return toast(err);
+    toast(act === "pub-reset" ? "已恢复成默认地址" : "公网地址已保存，正在重新连接");
+    return addDeviceSheet();
+  }
   if (act === "lights") return popSheet("lights");
   if (act === "temps") return popSheet("temp");
   if (act === "lights-on") return allLights(true);
@@ -1377,3 +1451,52 @@ function setOffline(off) {
 window.addEventListener("online", () => connect());
 showCached();
 connect();
+
+
+// ---------------------------------------------------------------- pull down to refresh
+// Starts only when the page is at its top and the finger moves mostly down; a long press, a drag of a card,
+// a room swipe or an open pop-up are left alone.
+(() => {
+  let y0 = 0, x0 = 0, pull = 0, on = false, busyRefresh = false, el = null;
+  const LIMIT = 70;
+  const bar = () => el || (el = (document.body.insertAdjacentHTML("beforeend", `<div id="ptr"><i></i><span></span></div>`), $("#ptr")));
+  const paint = (d, text, spin) => { const b = bar(); b.style.transform = `translateY(${d}px)`; b.style.opacity = Math.min(1, d / 40); b.classList.toggle("spin", !!spin); b.querySelector("span").textContent = text; };
+  const reset = () => { if (el) { el.style.transition = "transform .25s, opacity .25s"; el.style.transform = "translateY(0)"; el.style.opacity = 0; setTimeout(() => { if (el) el.style.transition = ""; }, 260); } };
+  document.addEventListener("touchstart", e => {
+    on = false; pull = 0;
+    if (busyRefresh || e.touches.length !== 1 || window.scrollY > 2 || S.edit || drag.active || S.pop || $("#sheet") || $("#kpage")) return;   // a finger that starts on a card counts too: moving cancels its long press
+    if (e.target.closest("input,[data-range],.wheel,.tabs")) return;
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; on = null;       // null = not decided yet
+  }, { passive: true });
+  document.addEventListener("touchmove", e => {
+    if (on === false || busyRefresh) return;
+    const dy = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0;
+    if (swipe.axis === "x") { if (on) reset(); on = false; return; }       // the room swipe owns this gesture
+    if (on === null) {
+      if (Math.abs(dy) < 12 && Math.abs(dx) < 12) return;
+      on = dy > 12 && dy > Math.abs(dx) * 1.6 && window.scrollY <= 2;     // clearly downward, not a diagonal swipe
+      if (!on) return;
+    }
+    if (window.scrollY > 2) { on = false; reset(); return; }
+    pull = Math.max(0, dy) * 0.5;
+    paint(Math.min(pull, 90), pull >= LIMIT ? "松开刷新" : "下拉刷新", false);
+    clearTimeout(drag.timer); drag.timer = 0;                    // not a long press on a card
+  }, { passive: true });          // passive: a listener that may cancel makes every swipe wait for the script
+  let lastFresh = 0;
+  const finish = async () => {
+    if (!on) { on = false; return; }
+    on = false;
+    if (pull < LIMIT) return reset();
+    busyRefresh = true; paint(56, "刷新中…", true);
+    try {
+      const fresh = Date.now() - lastFresh > 30000;      // rebuilding the device list takes a few seconds: not on every pull
+      await Promise.race([load(fresh), new Promise((_, no) => setTimeout(() => no(new Error("连接超时")), 12000))]);
+      if (fresh) lastFresh = Date.now();
+      toast("已刷新");
+    } catch (e) { toast("刷新失败：" + e.message); }
+    reset();
+    setTimeout(() => { busyRefresh = false; }, 1500);   // a short pause so a second pull right after can't stack up
+  };
+  document.addEventListener("touchend", finish);
+  document.addEventListener("touchcancel", () => { on = false; pull = 0; if (!busyRefresh) reset(); });   // the browser took the gesture: no refresh
+})();

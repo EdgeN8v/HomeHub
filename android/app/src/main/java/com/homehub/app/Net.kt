@@ -53,6 +53,26 @@ object Net {
 
     // ---- which address to use ------------------------------------------------
 
+    /** The public address chosen in the app (saved by the activity); null = the one built in. */
+    @Volatile var publicOverride: String? = null
+
+    fun publicUrl(): String = publicOverride ?: BuildConfig.PUBLICURL
+
+    /**
+     * What the person typed (a domain, domain:port or a full https:// address) -> a clean https URL, or null when it is
+     * not an address. Without a port the built-in one is kept (the router's port forward does not change with the name).
+     */
+    fun normalizePublic(input: String): String? {
+        var t = input.trim().trimEnd('/')
+        if (t.isEmpty()) return null
+        if (!t.contains("://")) t = "https://$t"
+        val uri = try { URI(t) } catch (e: Exception) { return null }
+        val host = uri.host?.lowercase() ?: return null
+        if (uri.scheme != "https" || !Regex("[a-z0-9]([a-z0-9.-]*[a-z0-9])?").matches(host)) return null
+        val port = if (uri.port > 0) uri.port else URI(BuildConfig.PUBLICURL).port.takeIf { it > 0 } ?: 443
+        return if (port == 443) "https://$host" else "https://$host:$port"
+    }
+
     @Volatile var base: String? = null
         private set
     private var checkedAt = 0L
@@ -75,7 +95,7 @@ object Net {
         if (!force) base?.takeIf { now - checkedAt < 60_000 }?.let { return@withContext it }
         val chosen = when {
             reachable(BuildConfig.LANURL, 400) -> BuildConfig.LANURL
-            reachable(BuildConfig.PUBLICURL, 2500) -> BuildConfig.PUBLICURL
+            reachable(publicUrl(), 2500) -> publicUrl()
             else -> base ?: BuildConfig.LANURL
         }
         base = chosen

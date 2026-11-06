@@ -97,6 +97,9 @@ class Home:
         self.device_ids: set[str] = set()
         self.event_ids: set[str] = set()
         self.subscribers: set[asyncio.Queue] = set()
+        self.entity_dev: dict[str, str] = {}
+        self._want_on: dict[str, bool] = {}
+        self._locks: dict[str, asyncio.Lock] = {}   # one write at a time per device: the Xiaomi cloud answers "busy" to a second one
 
     async def refresh(self):
         r = await self.ha.ws_commands(["config/device_registry/list", "config/entity_registry/list",
@@ -106,6 +109,7 @@ class Home:
                                 r["config/area_registry/list"], self.states,
                                 {e["entry_id"]: e["domain"] for e in r["config_entries/get"]})
         self.entities = {e for d in self.model["devices"] for e in d["entities"]}
+        self.entity_dev = {e: d["id"] for d in self.model["devices"] for e in d["entities"]}
         self.areas = {a["name"]: a["area_id"] for a in r["config/area_registry/list"]}
         self.device_ids = {d["id"] for d in self.model["devices"]}
         self.event_ids = {ev["entity_id"] for d in self.model["devices"] for ev in d["events"]}
@@ -334,7 +338,32 @@ class Home:
         if entity_id not in self.entities or service not in ALLOWED.get(domain, ()):
             raise web.HTTPForbidden(text=f"{domain}.{service} on {entity_id} not allowed")
         data = {k: v for k, v in (data or {}).items() if k != "entity_id"}
-        await self.ha.call(domain, service, {"entity_id": entity_id, **data})
+        await self._write(entity_id, domain, service, data)
+        if domain == "climate" and service in ("turn_on", "turn_off"):
+            self._want_on[entity_id] = service == "turn_on"
+            asyncio.create_task(self._ensure_power(entity_id, service == "turn_on"))
+
+    async def _write(self, entity_id: str, domain: str, service: str, data: dict):
+        lock = self._locks.setdefault(self.entity_dev.get(entity_id, entity_id), asyncio.Lock())
+        async with lock:
+            await self.ha.call(domain, service, {"entity_id": entity_id, **data})
+            await asyncio.sleep(0.4)
+
+    async def _ensure_power(self, entity_id: str, want_on: bool):
+        """An air conditioner that is sent several commands in a row can drop one (the cloud is busy): check that
+        on / off really happened and send it again, twice at most."""
+        for attempt in (1, 2):
+            for _ in range(12):
+                await asyncio.sleep(0.5)
+                if self._want_on.get(entity_id) != want_on:   # the person changed their mind meanwhile
+                    return
+                if ((self.states.get(entity_id) or {}).get("state") not in ("off", "unavailable", "unknown")) == want_on:
+                    return
+            log.warning("%s did not %s, sending it again (%d)", entity_id, "turn on" if want_on else "turn off", attempt)
+            try:
+                await self._write(entity_id, "climate", "turn_on" if want_on else "turn_off", {})
+            except Exception:
+                log.exception("retrying power of %s", entity_id)
 
     async def stream(self, request: web.Request) -> web.StreamResponse:
         """Server-sent events: one JSON {entity_id: {s, a}} per change, a comment every 20 s."""
