@@ -202,6 +202,17 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
             if e.entity_id.endswith(suf):
                 kx[key] = e.entity_id
 
+    wh_x = {}
+    if kind == "water_heater":
+        for e in ents:
+            for key, suf in WATER_HEATER_EXTRA.items():
+                if e.entity_id.endswith(suf):
+                    wh_x[key] = e.entity_id
+        # these get their own panel on the device page; don't also list them as generic rows
+        wh_ids = set(wh_x.values())
+        features = [f for f in features if f["entity_id"] not in wh_ids]
+        more = [f for f in more if f["entity_id"] not in wh_ids]
+
     room = area_name or ""
     home = ""
     if " " in room:
@@ -212,8 +223,8 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
         "features": features, "more": more, "events": events,
         # every entity's short label, for the automation editor ("厕所传感器 · 有人无人状态")
         "labels": {**{r["e"].entity_id: r["label"] for r in rows}, **{ev["entity_id"]: ev["label"] for ev in events}},
-        "entities": sorted({r["e"].entity_id for r in rows} | set(ac_x.values()) | set(kx.values())),
-        "ac": ac_x, "kx": kx,
+        "entities": sorted({r["e"].entity_id for r in rows} | set(ac_x.values()) | set(kx.values()) | set(wh_x.values())),
+        "ac": ac_x, "kx": kx, "wh": wh_x,
     }
 
 
@@ -228,6 +239,17 @@ AC_EXTRA = {
     "filter_life": "_filter_life_level_p_21_1", "filter_type": "_filter_screen_type_p_2_38",
     "kwh": "_power_consumption_p_20_1", "hours": "_running_duration_p_9_5", "fan_lever": "_realindoor_fan_lever_p_12_5",
     "clean": "_clean_p_9_1",
+}
+
+
+# The water heater's own properties (MIoT siid/piid in the entity id), found by suffix like the AC's.
+# Mijia shows these as 除菌 / 定时除菌 / 错峰用电; the generic feature list would otherwise bury them
+# under 更多设置 with bare labels like "周期".
+WATER_HEATER_EXTRA = {
+    "sterilize": "_on_p_4_1", "sterilize_timer": "_timer_on_p_4_2",
+    "sterilize_cycle": "_cycle_p_4_3", "sterilize_start": "_start_time_p_4_4",
+    "staggered": "_staggered_timer_p_2_11", "brightness": "_brightness_p_3_2",
+    "water_level": "_water_level_p_2_8", "anti_icing": "_anti_icing_status_p_2_9",
 }
 
 

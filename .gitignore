@@ -13,3 +13,16 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+.keys/
+bootstrap_new_machine.sh
+# 本机配置：机器地址和外网域名（hub 部署时拷到服务器）
+machines.json
+# 给其他对话看的本地操作说明，含路径和域名
+FOR_OTHER_CHATS.md
+idea_app/secrets.properties
+idea_app/local.properties
+idea_app/.gradle/
+idea_app/build/
+idea_app/app/build/
+idea_app/*.apk

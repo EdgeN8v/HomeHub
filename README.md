@@ -78,7 +78,7 @@ Home Assistant（设备层，跑在香橙派上）                  ← 当驱�
 
 ## 公网入口（NAS）
 
-NAS 上的容器 `homehub-forward`（nginx stream，`nas/nginx.conf`）：公网 IPv6 **8095** → 香橙派 8200，只转发 TCP，不解密。部署：`.\tools\deploy_nas.ps1`。极空间防火墙已放行 TCP 8095（2026-10-22）。家里只有 IPv6 公网，在外面的手机网络要有 IPv6。
+（已取消）NAS 上原来有个 `homehub-forward` 把公网 8095 转到香橙派 8200；香橙派 8200 现在能从外网直接访问，这个转发已于 2026-11-08 删除。NAS 当主站时由 NAS 上的 hub 自己监听 8095。
 
 ## 手机 App android/
 
@@ -110,6 +110,24 @@ NAS 上的容器 `homehub-forward`（nginx stream，`nas/nginx.conf`）：公网
 - 没分配房间的设备显示在首页的「未分配」分组（排在最前），用长按 → 移动设备放进房间。HA 自己的东西（日出日落、备份、天气、蓝牙适配器等，见 `home.py` 的 `INFRA_DOMAINS`）不会出现。
 - 以后买设备优先 Zigbee（香橙派插 Zigbee 接收棒）或 Matter（香橙派上跑 Matter 服务，用它的蓝牙配网）：不用厂商 App、不靠云、断网照常。自研设备用 ESPHome，HA 自动发现。App 里的「+ 添加设备」等第一个 Zigbee / Matter 设备到了再做。
 
+## 服务器页与一键迁移（2026-11-07）
+
+首页顶部「NAS」进入 `#/server`（`hub/app/static/monitor_ui.js`，后端 `hub/app/monitor.py`、`migrate.py`）：两台机器的 CPU / 内存 / 磁盘 + 容器表（可排序，点一行看说明、启停、迁移）；卡片长按可拖动排序；每台机器有「全部启动 / 全部停止」。
+
+- 香橙派的数据直接读本机 `/proc` 和 docker.sock（hub 容器挂了 `/var/run/docker.sock`，**等于有香橙派的管理权限**）；NAS 通过 SSH（账号密码在电脑 `.env` 的 `NAS_USER` / `NAS_PASSWORD`，部署时写进香橙派 `hub.env`）。
+- 不能从手机停止/重启的：`homehub-hub`（手机连家里靠它）。
+- **一键迁移（NAS → 香橙派）**：复制镜像 → 停 NAS 容器 → 复制数据到 `~/apps/<名>/` → 在香橙派上建同样的容器 → 确认端口通 → NAS 上留一个 nginx 转发（`<名>-forward`，地址不变）→ 删掉 NAS 上的旧容器（NAS 上的数据文件夹保留）。中途失败自动恢复。只搬单个容器、TCP 端口、数据 < 2GB；和别的容器共用内部网络的（Immich、Ledger）要整组搬，现在不支持。
+- 已迁到香橙派的：LearnSync（2026-11-07，`~/learnsync/`）。迁移记录在 hub 的 `migrations` 设置里。
+
+## 镜像仓库（2026-11-07）
+
+香橙派上的容器 `registry`（registry:2，`--memory 128m`，约 30MB 内存），**https://192.168.31.61:5000**，只在家里局域网，没有登录。数据 `~/registry/data`，证书 `~/registry/certs/`（自签，10 年，含 IP 192.168.31.61）。两台机器的 docker 都信任这张证书：`/etc/docker/certs.d/192.168.31.61:5000/ca.crt`（不用重启 docker）。
+
+- 服务器页最下面的「镜像仓库」卡片列出里面的镜像和大小，「同步镜像」把两台机器上所有容器用到的镜像推进去（`hub/app/registry.py`；已有的跳过，`:latest` 会重推）。镜像名＝原名去掉来源域名，例如 `ghcr.io/immich-app/immich-server:v3` → `192.168.31.61:5000/immich-app/immich-server:v3`。
+- 在任一台机器上拉：`docker pull 192.168.31.61:5000/<名>:<标签>`。以后自己构建的镜像构建完先 `docker tag` 再 `docker push` 到这里。
+- 首次同步 17 个镜像，仓库占约 2GB。
+- **还没做**：香橙派坏了仓库就没了——仓库数据要定期复制到 NAS 的大硬盘上，并能在 NAS 上起一个仓库（属于备份互通那一步）。
+
 ## 计划
 
 1. HA + 米家接入，验证洗衣机（米家双区洗衣机 Pro 双洗烘 10kg）能不能远程预约 ✓（2026-10-22）
@@ -118,3 +136,53 @@ NAS 上的容器 `homehub-forward`（nginx stream，`nas/nginx.conf`）：公网
 4. 语音链路：SenseVoice 识别（香橙派，可用 NPU）→ 大模型 → TTS，先用手机麦克风跑通
 5. 小爱音箱：型号支持就刷 open-xiaoai 接到自己的后端，否则用 mi-gpt 过渡
 6. ESP32-S3 按键拾音器
+
+### 镜像仓库的 NAS 备份
+- 香橙派的仓库数据（`~/registry/data`，只读挂进 hub 容器的 `/registry-data`）每天凌晨 3:30 自动同步到 NAS `/data_s001/docker_appstore/registry-mirror/data`，“同步镜像”之后也会自动同步，服务器页的仓库卡片可以手动“立即同步”。
+- 做法：文件内容寻址，只传缺的、删多余的（走 hub 已有的 NAS 登录，tar 流写入，没有新增任何密钥）。
+- NAS 上的 `registry-standby` 容器（`https://192.168.31.131:5000`，只读，~30MB 内存，证书在 `registry-mirror/certs`，两台的 docker 都已信任）直接提供这份副本；香橙派坏了就从它拉镜像。
+
+## 地址表（App 连哪个地址）
+
+App 不再把服务器地址写死。hub 维护一张地址表（`hub/app/endpoints.py`）：每个服务有 `lan`（家里）和 `wan`（外网）两组地址，`check` 是探测用的路径，`expect` 是回应里必须出现的内容。
+- 读取：`GET /api/endpoints`（不需要令牌，只含地址）。NAS 上有一份副本 `http://192.168.31.131:8099/endpoints.json`，香橙派挂了也能读。
+- 修改：`POST /api/endpoints`（要令牌），body `{"services": {"名字": {"check":..., "expect":..., "lan": [...], "wan": [...]}}}`，版本号自动加一，并同步 NAS 副本。
+- 手机壳（`android/.../Net.kt`）：启动先用缓存的表，后台刷新；同时探测所有地址，家里的优先（1 秒窗口），回应内容要对；全不通时用 `NetFallback` 换另一条网络。
+
+## 换机器 / 换 IP（香橙派坏了换新的，或服务想长期跑在 NAS 上）
+
+所有地址、端口、文件夹都在 `hub/app/machines.py`；要改的字段写进仓库根目录的 `machines.json`（只写变的，如
+`{"machines": {"pi": {"address": "192.168.31.70"}}}`）。步骤：
+
+1. 新机器装好 docker，`python tools/join_machine.py --role pi`（先检查）→ 加 `--apply`（补齐密钥、文件夹、仓库证书；首次需设置环境变量 `JOIN_PASSWORD`）。
+2. 换 IP **不需要**重签 hub 证书：App 按证书指纹固定、不校验主机名。证书不要随便删，重签会让所有已固定的 App 失效（有效期到 2036 年）。只需要改 `machines.json`。
+3. `python tools/deploy_sentinel.py`（两台哨兵，并把 machines.json 分发到 hub/ops/哨兵读的 `/data/machines.json`）→ `tools\deploy_hub.ps1`。
+4. 数据靠 5 分钟一次的主备复制和镜像仓库同步自动过去；手机“地址表”（hub 里存的 endpoints）里的旧 IP 用服务器页或 `PUT /api/endpoints` 改一次。
+所有 tools\*.ps1 的默认地址也来自同一份表（`python tools/mget.py pi address`）。
+
+## 给其他对话说的一句话（最简版）
+
+- **App 读地址**：`GET /api/endpoints`（无需令牌），按服务名取 `lan` / `wan` 列表依次试。
+- **新服务要进地址表**：容器起来、发布好端口即可。手机 HomeHub →服务器页 →“地址表”卡片会出现“未登记”，点“登记”（或“全部登记”）就行，不用写任何命令、不用令牌。
+- 想一开始就自动登记：部署时带 `homehub.service=名字` 标签（见下面）。
+
+## 给新 App / 新服务登记地址（任何对话都能做，不依赖某一次聊天）
+
+地址表在 HomeHub 里，App **读**表不需要任何令牌：`GET /api/endpoints`。要**登记或修改**一个服务，在任意项目里运行：
+
+```
+python D:\Github\HomeHub\tools\register_service.py 服务名 --check /health --expect ok ^
+    --lan http://192.168.31.61:端口 --lan http://192.168.31.131:端口 ^
+    --wan http://pi.example.com:端口 --wan http://nas.example.com:端口
+python D:\Github\HomeHub\tools\register_service.py --list      # 看现在的表
+```
+
+`--lan/--wan` 按 App 应该试的顺序写（服务现在跑在哪台就把哪台放前面）。脚本用 `D:\Github\HomeHub\.env` 里的 `ENDPOINTS_TOKEN`，这个小令牌**只能新增/修改服务条目**，不能改 `homehub` 这一项、不能删除、不能调用 hub 的其他功能，所以不用也不要把 `HUB_TOKEN` 给别的项目。
+
+### 地址表现在会自己更新
+
+HomeHub 每分钟看一次两台机器上的容器，按"这个服务现在跑在哪台"自动把那台的地址排在最前面（内网和外网域名都是）。服务搬家后，地址表在约一分钟内自动调整，App 下次读表就拿到新顺序，不用做任何操作。
+
+- **已有服务**（music、immich、ledger、music-update）已经自动管理。
+- **新服务**：用 `tools\ship_service.ps1` 部署时加 `-Service 名字 -CheckPath /health -Expect ok`（可选 `-ServicePort`），容器会带上 `homehub.service` 等标签，HomeHub 自动发现并登记。手动起的容器可以自己加标签：`--label homehub.service=名字 --label homehub.check=/health --label homehub.expect=ok --label homehub.port=端口`。
+- 没带标签的容器不会进地址表。想手动改表时，仍可用上面的 `register_service.py`。

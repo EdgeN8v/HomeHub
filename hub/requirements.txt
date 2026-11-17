@@ -1,3 +1,13 @@
 aiohttp==3.10.10
 tzdata==2024.2
-cryptography==43.0.3
+cryptography==50.0.2
+paramiko==3.5.0
+pycryptodome==3.21.0
+# BLE 直连：被动监听米家 BLE 广播并用自带 bindkey 本地解密（ble_listen.py）。
+# bluetooth-data-tools 需要 cryptography>=47，故上面从 43.0.3 升到 50.0.2。
+bleak==3.1.0
+xiaomi-ble==1.22.1
+bluetooth-data-tools==1.29.24
+bluetooth-sensor-state-data==1.9.2
+sensor-state-data==2.20.0
+dbus-fast==5.2.0

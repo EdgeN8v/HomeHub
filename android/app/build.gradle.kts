@@ -23,8 +23,11 @@ android {
         applicationId = "com.homehub.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 12
-        versionName = "2.1"
+        versionCode = 40
+        versionName = "3.19"
+        // The installed HomeHub phones are ARM64. Excluding unused emulator/legacy ABIs
+        // keeps the self-update APK small for users on slow mobile links.
+        ndk { abiFilters += "arm64-v8a" }
         for (k in listOf("lanUrl", "publicUrl", "token", "pin")) {
             buildConfigField("String", k.uppercase(), "\"${secrets.getProperty(k)}\"")
         }
@@ -63,4 +66,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // Pinned-certificate HTTPS client for the update check and download.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Camera picture: hardware-decoded H.265 straight from the hub's pass-through stream.
+    implementation("androidx.media3:media3-exoplayer:1.3.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.3.1")
 }

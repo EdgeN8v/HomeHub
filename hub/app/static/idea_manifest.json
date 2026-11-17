@@ -1,0 +1,9 @@
+{
+  "name": "Idea",
+  "short_name": "Idea",
+  "start_url": "/idea",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [{ "src": "/static/idea.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

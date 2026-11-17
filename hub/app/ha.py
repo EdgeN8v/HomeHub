@@ -17,6 +17,7 @@ class HA:
         self.headers = {"Authorization": f"Bearer {token}"}
         self.token = token
         self.session: aiohttp.ClientSession | None = None
+        self.local = None          # LocalBridge: devices that are switched to direct control are written to without Home Assistant
 
     async def start(self):
         self.session = aiohttp.ClientSession(headers=self.headers, timeout=aiohttp.ClientTimeout(total=30))
@@ -28,18 +29,31 @@ class HA:
     async def state(self, entity_id: str) -> dict:
         async with self.session.get(f"{self.url}/api/states/{entity_id}") as r:
             r.raise_for_status()
-            return await r.json()
+            st = await r.json()
+        if self.local is not None:          # a directly read device answers for itself (Home Assistant's copy can be stale)
+            st = (await self.local.overlay({entity_id: st}))[entity_id]
+        return st
 
     async def states(self, entity_ids: list[str]) -> dict[str, dict]:
         async with self.session.get(f"{self.url}/api/states") as r:
             r.raise_for_status()
             want = set(entity_ids)
-            return {s["entity_id"]: s for s in await r.json() if s["entity_id"] in want}
+            out = {s["entity_id"]: s for s in await r.json() if s["entity_id"] in want}
+        return await self.local.overlay(out) if self.local is not None else out
 
     async def call(self, domain: str, service: str, data: dict):
+        if self.local is not None and await self.local.try_call(domain, service, data):
+            return []
         async with self.session.post(f"{self.url}/api/services/{domain}/{service}", json=data) as r:
             r.raise_for_status()
             return await r.json()
+
+    async def forecast(self, entity_id: str, kind: str) -> list[dict]:
+        """weather.get_forecasts for kind "hourly" | "daily"."""
+        async with self.session.post(f"{self.url}/api/services/weather/get_forecasts?return_response",
+                                     json={"entity_id": entity_id, "type": kind}) as r:
+            r.raise_for_status()
+            return ((await r.json()).get("service_response") or {}).get(entity_id, {}).get("forecast", [])
 
     async def automation_config(self, automation_id: str) -> dict | None:
         """The stored config (alias, description, triggers...) of a UI-made automation, or None."""

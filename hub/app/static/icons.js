@@ -4,6 +4,7 @@ const ICON_PATHS = {
   heater: '<rect x="3" y="7" width="18" height="10" rx="2.5"/><path d="M7 7v10M11 7v10M15 7v10M5 20h2M17 20h2"/>',
   light: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/>',
   switch: '<rect x="5" y="3" width="14" height="18" rx="3"/><rect x="9" y="7" width="6" height="10" rx="1.5"/>',
+  bolt: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
   plug: '<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v4"/>',
   fan: '<circle cx="12" cy="11" r="1.6"/><path d="M12 9.4C11 6 12 3.5 14.5 3.5c2.2 0 2.3 3.6-1 6.3M13.6 11.4c3.4-.4 5.6 1.1 5 3.4-.6 2.1-3.9 1.2-5.5-1.8M10.6 12C9 15 6.5 15.8 5.2 13.8 4 12 6.5 9.8 10.4 10.5M12 12.6V21M8 21h8"/>',
   humidifier: '<path d="M12 3s-5 5.6-5 9.5a5 5 0 0 0 10 0C17 8.6 12 3 12 3z"/><path d="M9.5 13.5a2.5 2.5 0 0 0 2.5 2.5"/>',
@@ -38,6 +39,8 @@ const ICON_PATHS = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   list: '<rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M9 9h6M9 12.5h6M9 16h4"/>',
   caret: '<path d="M6 9l6 6 6-6"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  server: '<rect x="4" y="4" width="16" height="6.5" rx="2"/><rect x="4" y="13.5" width="16" height="6.5" rx="2"/><path d="M8 7.2h.01M8 16.8h.01"/>',
   shield: '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/>',
   alert: '<path d="M12 3l9.5 17h-19L12 3zM12 10v4.5M12 17.5h.01"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -48,6 +51,9 @@ const ICON_PATHS = {
   trash: '<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/>',
   home: '<path d="M4 10.5L12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19z"/>',
   smart: '<path d="M12 3l7.5 4.3v8.6L12 20.2l-7.5-4.3V7.3z"/><path d="M9 11.5l2.2 2.2L15.5 9.5"/>',
+  snow: '<path d="M12 2v20M4.5 6.5l15 11M19.5 6.5l-15 11M12 2l-2 2M12 2l2 2M12 22l-2-2M12 22l2-2M4.5 6.5l2.8.3M4.5 6.5l1-2.6M19.5 6.5l-2.8.3M19.5 6.5l-1-2.6M4.5 17.5l2.8-.3M4.5 17.5l1 2.6M19.5 17.5l-2.8-.3M19.5 17.5l-1 2.6"/>',
+  bell: '<path d="M6 17h12v-1.3c0-.6-.2-1.1-.6-1.6L17 13V9.5a5 5 0 0 0-10 0V13l-.4 1.1a2.2 2.2 0 0 0-.6 1.6V17z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
+  sun: '<circle cx="12" cy="12" r="4.5"/><path d="M12 3v2.5M12 18.5V21M4.2 4.2l1.8 1.8M18 18l1.8 1.8M3 12h2.5M18.5 12H21M4.2 19.8L6 18M18 6l1.8-1.8"/>',
 };
 function icon(name) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ICON_PATHS.other}</svg>`;

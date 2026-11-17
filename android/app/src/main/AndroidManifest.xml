@@ -18,6 +18,10 @@
         <package android:name="com.xiaomi.smarthome" />
     </queries>
 
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- device reminders from the hub (防冻提醒 ...), checked in the background by NoticeJob (Notices.kt) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -34,6 +38,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <service android:name=".NoticeJob" android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <activity android:name=".CameraActivity" android:exported="false" android:theme="@style/Theme.HomeHub"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
 
         <activity
             android:name=".MainActivity"

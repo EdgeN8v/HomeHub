@@ -23,7 +23,9 @@ import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -36,6 +38,7 @@ class MainActivity : Activity() {
     private val scope = MainScope()
     private val shell by lazy { ShellCache(this) }
     private lateinit var web: WebView
+    private lateinit var inline: InlineCam
     private var pendingInstall: File? = null
     private var downloadJob: Job? = null
     // answers go back to the page as window.hhSetup(id, json) (see Bridge.setup)
@@ -49,7 +52,11 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         web = WebView(this)
-        setContentView(web)
+        val rootView = android.widget.FrameLayout(this)
+        rootView.addView(web, android.widget.FrameLayout.LayoutParams(-1, -1))
+        setContentView(rootView)
+        inline = InlineCam(this, rootView, { web.evaluateJavascript("window.hhCamEnded && hhCamEnded()", null) },
+            { src, clip -> startActivity(Intent(this, CameraActivity::class.java).putExtra("src", src).apply { if (clip.isNotEmpty()) putExtra("clip", clip) }) })
         edgeToEdge()
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
@@ -69,6 +76,7 @@ class MainActivity : Activity() {
         // Open at once - the page and its last snapshot come from the phone (ShellCache, localStorage).
         // Requests start on the route that worked last time; the LAN / public probe runs meanwhile and
         // only changes where the relay sends them, the page itself stays.
+        Net.init(this)
         Net.publicOverride = prefs.getString("public_url", null)
         prefs.getString("last_base", null)?.let { Net.assume(it) }
         loadHome()
@@ -77,6 +85,33 @@ class MainActivity : Activity() {
             checkUpdate(silent = true)
         }
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
+        Notices.setup(this)
+        if (!Notices.allowed(this) && !prefs.getBoolean("asked_notify", false)) {
+            prefs.edit().putBoolean("asked_notify", true).apply()
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
+        }
+    }
+
+    // While the app is in use the hub's notices arrive at once over a long poll; in the background NoticeJob checks every ~15 min.
+    private var noticeLoop: Job? = null
+
+    private fun startNoticeLoop() {
+        if (noticeLoop?.isActive == true) return
+        noticeLoop = scope.launch(Dispatchers.IO) {
+            while (true) {
+                if (!Notices.poll(this@MainActivity, 45)) kotlinx.coroutines.delay(15_000)
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startNoticeLoop()
+    }
+
+    override fun onStop() {
+        noticeLoop?.cancel()
+        super.onStop()
     }
 
     // A network came back (or changed, e.g. Wi-Fi <-> 5G): re-probe the route and have the page reconnect
@@ -123,7 +158,13 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        if (::inline.isInitialized && inline.playing()) { inline.stop(notify = true) }
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        if (::inline.isInitialized) inline.destroy()
         getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
         scope.cancel()
         super.onDestroy()
@@ -144,6 +185,7 @@ class MainActivity : Activity() {
     /** Status / insets in CSS px, handed to the page (it pads its header by them). */
     @Volatile private var insetTopCss = 0f
     @Volatile private var insetBottomCss = 0f
+    @Volatile private var keyboardCss = 0f          // how much of the screen the keyboard covers, above the bottom bar
 
     /**
      * The page's gradient runs up under a transparent status bar with white icons, like Mijia.
@@ -167,6 +209,7 @@ class MainActivity : Activity() {
             val density = resources.displayMetrics.density
             insetTopCss = bars.top / density
             insetBottomCss = bars.bottom / density
+            keyboardCss = maxOf(0f, (insets.getInsets(WindowInsetsCompat.Type.ime()).bottom - bars.bottom) / density)
             pushInsets()
             insets
         }
@@ -175,7 +218,8 @@ class MainActivity : Activity() {
     private fun pushInsets() {
         web.evaluateJavascript(
             "document.documentElement.style.setProperty('--sat','${insetTopCss}px');" +
-                "document.documentElement.style.setProperty('--sab','${insetBottomCss}px');", null
+                "document.documentElement.style.setProperty('--sab','${insetBottomCss}px');" +
+                "document.documentElement.style.setProperty('--kb','${keyboardCss}px');window.hhKeyboard=true;", null
         )
     }
 
@@ -290,6 +334,20 @@ class MainActivity : Activity() {
             runOnUiThread { scope.launch { rememberRoute(Net.baseUrl(force = true)); web.evaluateJavascript("window.connect && connect()", null) } }
             return ""
         }
+        /** "测试连接": the answer comes back as window.hhTest(id, {ok, msg}). */
+        @JavascriptInterface fun testPublicUrl(id: String, input: String) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { Net.testPublic(input) }
+                web.evaluateJavascript("window.hhTest && hhTest(${JSONObject.quote(id)}, ${JSONObject(r).toString()})", null)
+            }
+        }
+        /** "看画面": native player (hardware H.265) instead of the web page's frame relay. */
+        @JavascriptInterface fun openCamera(src: String, clip: String) = runOnUiThread { startActivity(Intent(this@MainActivity, CameraActivity::class.java).putExtra("src", src).apply { if (clip.isNotEmpty()) putExtra("clip", clip) }) }
+        /** The camera card plays inside the page: the native player is laid over the card's picture box (x, y, w, h in CSS px). */
+        @JavascriptInterface fun playInline(src: String, clip: String, x: Float, y: Float, w: Float, h: Float, name: String, radius: Float) = runOnUiThread { inline.play(src, clip, x, y, w, h, name, radius) }
+        @JavascriptInterface fun camTap() = runOnUiThread { inline.tap() }
+        @JavascriptInterface fun moveInline(x: Float, y: Float, w: Float, h: Float, visible: Boolean) = runOnUiThread { inline.move(x, y, w, h, visible) }
+        @JavascriptInterface fun stopInline() = runOnUiThread { inline.stop(notify = false) }
         @JavascriptInterface fun hasSetup(): Boolean = true
         @JavascriptInterface fun insetTop(): Float = insetTopCss
         @JavascriptInterface fun insetBottom(): Float = insetBottomCss
@@ -303,6 +361,7 @@ class MainActivity : Activity() {
          * cached snapshot are one and the same at home, outside and offline.
          */
         const val ORIGIN_HOST = "homehub.local"
+        const val REQ_NOTIFY = 7301
         const val ORIGIN = "https://$ORIGIN_HOST"
     }
 }

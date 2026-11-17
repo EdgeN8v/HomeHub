@@ -39,8 +39,12 @@ def _env(key: str, default: str | None = None) -> str | None:
 PUBLIC_HOST = _env("PUBLIC_HOST")      # your DDNS name, e.g. home.example.com; put it in .env
 if not PUBLIC_HOST:
     raise SystemExit("set PUBLIC_HOST (your public DDNS name) in .env or the environment first")
-NAMES = ["192.168.31.61", PUBLIC_HOST, "localhost", "127.0.0.1"]
-LAN_URL = "https://192.168.31.61:8200"
+import os, sys  # noqa: E401
+os.environ.setdefault("MACHINES_FILE", str(ROOT / "machines.json"))
+sys.path.insert(0, str(ROOT / "hub" / "app"))
+import machines as mc  # noqa: E402
+NAMES = [mc.addr("pi"), mc.addr("nas"), PUBLIC_HOST, "localhost", "127.0.0.1"]
+LAN_URL = mc.hub_url("pi")
 PUBLIC_URL = f"https://{PUBLIC_HOST}:{_env('PUBLIC_PORT', '8095')}"
 
 

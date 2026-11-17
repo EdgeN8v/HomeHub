@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.washer_logic import (Event, WATCHED, buffer_minutes, derive_runs, drum_entities,
+from app.washer_logic import (booking_biases, calibrated_buffer, Event, WATCHED, buffer_minutes, derive_runs, drum_entities,
                               next_occurrence, plan_booking, DEFAULT_FINISH_BY)
 
 TZ = timezone(timedelta(hours=8))
@@ -72,10 +72,10 @@ def test_buffer_default_then_learned():
 def test_plan_normal_night():
     now = t(23, 0)
     finish_by = next_occurrence(now, DEFAULT_FINISH_BY)
-    assert finish_by == t(5, 50, 22)
+    assert finish_by == t(6, 0, 22)
     p = plan_booking("upper", now, finish_by, 152, 20, "")
-    assert p.ok and p.reservation_min == 390                         # 23:00 -> 05:30
-    assert p.washer_finish == t(5, 30, 22) and p.expected_start == t(2, 58, 22)
+    assert p.ok and p.reservation_min == 400                         # 23:00 -> 05:40
+    assert p.washer_finish == t(5, 40, 22) and p.expected_start == t(3, 8, 22)
     assert not any("谷电" in n for n in p.notes)
 
 
@@ -88,7 +88,7 @@ def test_plan_too_late_starts_now():
 def test_plan_before_valley_warns():
     now = t(18, 0)
     p = plan_booking("upper", now, next_occurrence(now, DEFAULT_FINISH_BY), 600, 20, "")
-    assert p.ok and p.expected_start == t(19, 30) and any("谷电" in n for n in p.notes)
+    assert p.ok and p.expected_start == t(19, 40) and any("谷电" in n for n in p.notes)
 
 
 def test_plan_without_estimate_fails():
@@ -133,3 +133,17 @@ def test_dry_only_length_check():
     assert check_booked_length(p, 30) is None      # lab 2026-10-25: 自定义 + 单烘干 plans exactly the drying time
     assert check_booked_length(p, 44) is None
     assert "洗涤" in check_booked_length(p, 69)     # 随心洗烘 + 单烘干 planned 69 min: washing as well
+
+
+def test_calibration_follows_real_end_times():
+    # upper drum: told 04:49, really ended 05:53 .. 06:32; one night with a door opened (+214) is ignored
+    ends = [64, 84, 104, 74, 94, 214, 88]
+    samples = [(t(1, 0, 10 + i), float(b)) for i, b in enumerate(ends)]
+    buf, note = calibrated_buffer(samples)
+    assert 88 <= buf <= 96 and "晚结束" in note
+    assert calibrated_buffer(samples[:2]) is None                    # too few runs: the caller falls back
+    early = calibrated_buffer([(t(1, 0, 10 + i), -80.0) for i in range(4)], early=False)
+    assert early[0] == -80 and "早结束" in early[1]                  # lower drum finishes earlier than it says
+    # a negative buffer pushes the washer's finish later: 06:00 target, 80 min early -> told 07:20
+    p = plan_booking("lower", t(1, 0), t(6, 0), 246, -80, "")
+    assert p.ok and p.washer_finish == t(7, 20) and p.expected_start == t(3, 14)

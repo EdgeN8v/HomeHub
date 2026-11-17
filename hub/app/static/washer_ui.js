@@ -4,7 +4,17 @@
 // /api/washer/start, which writes the whole program first (the washer keeps its own stale copy).
 "use strict";
 
-const W = { drum: "lower", info: null, infoAt: 0, drafts: {}, sending: false };
+const W = {
+  drum: "lower", info: null, infoAt: 0, infoLoading: null, drafts: {}, sending: false,
+  cleanProgress: (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("washer-clean-progress-v1") || "null");
+      if (!saved || typeof saved !== "object") return null;
+      const valid = v => Number.isFinite(v) && v >= 0 && v <= 1;
+      return valid(saved.upper) && valid(saved.lower) ? { upper: saved.upper, lower: saved.lower } : null;
+    } catch (e) { return null; }
+  })(),
+};
 const W_SIID = { upper: 12, lower: 13 };
 const W_NAME = { upper: "上筒", lower: "下筒" };
 // The five shown on the main page, as in Mijia; the rest are under 更多.
@@ -33,26 +43,47 @@ const W_ICON = {
 };
 const wIcon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${W_ICON[name] || W_ICON["白衣净"]}</svg>`;
 
+// Icons for the mode-page settings rows themselves (温度/转速/漂洗… instead of plain text), Mijia-style.
+const W_ROW_ICON = {
+  dry_only: '<path d="M3 8h12a3 3 0 1 0-3-3M3 14h14a3 3 0 1 1-3 3M3 18h9"/>',
+  blue_oxygen: '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/>',
+  steam: '<rect x="5" y="3" width="14" height="6" rx="2"/><path d="M7 21c0-2 2-2 2-4s-2-2-2-4M12 21c0-2 2-2 2-4s-2-2-2-4M17 21c0-2 2-2 2-4s-2-2-2-4"/>',
+  steam_time: '<rect x="5" y="3" width="14" height="6" rx="2"/><path d="M7 21c0-2 2-2 2-4s-2-2-2-4M12 21c0-2 2-2 2-4s-2-2-2-4M17 21c0-2 2-2 2-4s-2-2-2-4"/>',
+  soak: '<path d="M12 3s-5 6-5 10a5 5 0 0 0 10 0c0-4-5-10-5-10z"/><path d="M12 9.5v2.5l1.8.9"/>',
+  temp: '<path d="M10 14.5V5a2 2 0 0 1 4 0v9.5a4 4 0 1 1-4 0z"/><path d="M12 9v7"/>',
+  rinse: '<path d="M12 3s-6 7-6 11a6 6 0 0 0 12 0c0-4-6-11-6-11z"/>',
+  spin: '<path d="M4 12a8 8 0 0 1 8-8M20 12a8 8 0 0 1-8 8"/><path d="M4 12l3-3M4 12l3 3M20 12l-3-3M20 12l-3 3"/>',
+  drying: '<circle cx="12" cy="11" r="1.6"/><path d="M12 9.4C11 6 12 3.5 14.5 3.5c2.2 0 2.3 3.6-1 6.3M13.6 11.4c3.4-.4 5.6 1.1 5 3.4-.6 2.1-3.9 1.2-5.5-1.8M10.6 12C9 15 6.5 15.8 5.2 13.8 4 12 6.5 9.8 10.4 10.5M12 12.6V21M8 21h8"/>',
+  high_water: '<rect x="5" y="4" width="14" height="16" rx="3"/><path d="M5 10.5c1.3-1 2.7-1 4 0s2.7 1 4 0 2.7-1 4 0"/>',
+  sleep_mode: '<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>',
+};
+const wRowIcon = key => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${W_ROW_ICON[key] || ""}</svg>`;
+
 // Settings rows per drum, in Mijia's order. kind: sw (switch) | pick (bottom-sheet list).
 const W_ROWS = {
   lower: ["dry_only", "blue_oxygen", "steam", "soak", "temp", "rinse", "spin", "drying", "high_water", "sleep_mode"],
   upper: ["dry_only", "soak", "temp", "rinse", "spin", "drying", "steam_time", "sleep_mode"],
 };
-const W_WASH_ONLY = new Set(["blue_oxygen", "steam", "soak", "temp", "rinse", "spin", "high_water", "steam_time"]);
+const W_WASH_ONLY = new Set(["blue_oxygen", "steam", "soak", "temp", "rinse", "spin", "high_water", "steam_time", "shake"]);
 const W_LABEL = { dry_only: "单烘干", blue_oxygen: "蓝氧除菌", steam: "蒸汽除菌", soak: "浸泡时长", temp: "洗涤温度", rinse: "漂洗次数",
-  spin: "脱水转速", drying: "烘干时长", high_water: "高水位", sleep_mode: "夜间模式", steam_time: "蒸汽除菌时长" };
+  spin: "脱水转速", drying: "烘干时长", shake: "清新抖散", high_water: "高水位", sleep_mode: "夜间模式", steam_time: "蒸汽除菌时长" };
 const W_PICK = {
   soak: [[0, "不浸泡"], [10, "10 分钟"], [20, "20 分钟"], [30, "30 分钟"], [45, "45 分钟"], [60, "60 分钟"]],
   temp: [["常温", "常温", "最省电，冬天水太凉时不建议"], ["30", "30°C", "帮洗涤剂溶解，适合冬天"], ["40", "40°C", "去污力强，适合大多数衣物"],
          ["60", "60°C", "杀灭大部分细菌，加热时间较长"], ["95", "95°C", "高温煮洗，只适合耐高温的棉织物"]],
   rinse: [[1, "1次"], [2, "2次"], [3, "3次"], [4, "4次"], [5, "5次"]],
   spin: [["无", "不脱水"], ["400", "400"], ["600", "600"], ["800", "800"], ["1000", "1000"], ["1200", "1200"]],
+  shake: [[0, "不开启"], [30, "0.5 小时"], [60, "1 小时"], [120, "2 小时"], [240, "4 小时"], [480, "8 小时"], [720, "12 小时"], [1440, "24 小时"]],   // Mijia: 2/4/8/12/24 h; 0.5 and 1 h are extra
   steam_time: [["0", "不开启"], ["12", "12 分钟"], ["18", "18 分钟"]],
 };
-const W_DEGREE = [["Store", "收纳干", "最干，适合直接收进衣柜"], ["Wear Immediately", "即穿", "干到可以直接穿"], ["Ironing", "熨烫干", "微潮，方便熨烫"]];
+const W_DEGREE = [["Ironing", "熨烫", "微潮，方便熨烫"], ["Wear Immediately", "即穿", "干到可以直接穿"], ["Store", "储藏", "最干，适合直接收进衣柜"]];
 // What a built-in mode starts from (Mijia shows the same for 智能); 自定义 uses the saved program.
 const W_DEFAULT = { dry_only: false, blue_oxygen: false, steam: false, soak: 0, temp: "40", rinse: 2, spin: "800",
-  drying_level: "不烘干", drying_degree: "Wear Immediately", drying_time: 60, high_water: false, sleep_mode: false, steam_time: "0" };
+  drying_level: "不烘干", drying_degree: "Wear Immediately", drying_time: 60, high_water: false, sleep_mode: false, steam_time: "0", shake: 0 };
+// 快速 is three sub-modes in Mijia (极快 / 超快 / 快速); its other settings start from these values and it has no soak/steam/high-water rows.
+const W_QUICK = [["Level1", "极快", 12], ["Level2", "超快", 20], ["Level3", "快速", 30]];
+const W_MODE_DEFAULT = { "快速": { quick_level: "Level2", temp: "常温", rinse: 1, spin: "800", drying_level: "不烘干", shake: 0 } };
+const W_MODE_ROWS = { "快速": ["dry_only", "blue_oxygen", "temp", "rinse", "spin", "drying", "shake", "sleep_mode"] };
 
 function wPrefix(d) {
   const e = d.entities.find(x => /_status_p_12_28$/.test(x));
@@ -78,9 +109,21 @@ function wRoute() {
 }
 
 async function wLoadInfo(force) {
+  if (W.infoLoading) return W.infoLoading;
   if (!force && W.info && Date.now() - W.infoAt < 60000) return;
   W.infoAt = Date.now();
-  try { W.info = await api("/api/washer"); scheduleRender(); } catch (e) { /* page still works from live states */ }
+  W.infoLoading = api("/api/washer").then(info => {
+    W.info = info;
+    const progress = Object.fromEntries(["upper", "lower"].map(k => [k, info?.drums?.[k]?.clean?.progress]));
+    if ([progress.upper, progress.lower].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) {
+      W.cleanProgress = progress;
+      try { localStorage.setItem("washer-clean-progress-v1", JSON.stringify(progress)); } catch (e) { /* cache is optional */ }
+    }
+    scheduleRender();
+  })
+    .catch(e => { /* page still works from live states; a later render can retry */ })
+    .finally(() => { W.infoLoading = null; });
+  return W.infoLoading;
 }
 
 function renderWasher(d) {
@@ -92,13 +135,32 @@ function renderWasher(d) {
 }
 
 const wBusy = s => s === "工作中" || s === "暂停中" || s === "预约中";
+// 还剩 must agree with 约X洗完: derive it from the server's finish instant against the live clock,
+// not from the washer's raw remaining-time entity (that one streams on a different cadence than the status poll, so the two numbers desync between polls).
+const wFmtMin = m => m >= 60 ? `${Math.floor(m / 60)}小时${m % 60 ? (m % 60) + "分" : ""}` : `${m}分钟`;
+// Round once, then derive BOTH labels from that rounded duration. The server's HH:MM is
+// minute-truncated while the remaining label was rounded, which could differ by 1 minute.
+const wFinishDisplay = (iso, now = Date.now()) => {
+  const finish = Date.parse(iso);
+  if (!Number.isFinite(finish)) return null;
+  const remain = Math.max(0, Math.round((finish - now) / 60000));
+  const displayFinish = new Date(now + remain * 60000);
+  const zone = String(iso).match(/([+-])(\d{2}):?(\d{2})$/);
+  const offsetMin = zone ? (zone[1] === "+" ? 1 : -1) * (Number(zone[2]) * 60 + Number(zone[3])) : 0;
+  const zonedFinish = new Date(displayFinish.getTime() + offsetMin * 60000);
+  const pad = n => String(n).padStart(2, "0");
+  return { remain: remain > 0 ? wFmtMin(remain) : "即将完成", eta: `${pad(zonedFinish.getUTCHours())}:${pad(zonedFinish.getUTCMinutes())}` };
+};
 
 function wHome(d) {
   const ids = wIds(d, W.drum), on = isOn(ids.power), off = deviceOffline(d);
   const s = val(ids.status), stage = val(ids.stage), info = W.info?.drums?.[W.drum];
   const other = W.drum === "upper" ? "lower" : "upper", os = val(wIds(d, other).status);
   let state = off ? "离线" : !on ? "已关机" : s, sub = "";
-  if (on && s === "工作中") sub = [stage && stage !== "未运行" ? stage : "", num(ids.left) ? `还剩 ${minutes(ids.left)}` : "", info?.finish_eta ? `约 ${info.finish_eta} 洗完` : ""].filter(Boolean).join(" · ");
+  if (on && s === "工作中") {
+    const finish = info?.finish_at ? wFinishDisplay(info.finish_at) : null;
+    sub = [stage && stage !== "未运行" ? stage : "", finish ? `还剩 ${finish.remain}` : (num(ids.left) ? `还剩 ${minutes(ids.left)}` : ""), finish ? `约 ${finish.eta} 洗完` : (info?.finish_eta ? `约 ${info.finish_eta} 洗完` : "")].filter(Boolean).join(" · ");
+  }
   else if (on && s === "预约中") sub = info?.finish_eta ? `预约 ${info.finish_eta} 洗完` : "已预约";
   else if (on && s === "暂停中") sub = stage && stage !== "未运行" ? `停在「${stage}」` : "";
   if (on && wBusy(os)) sub += `${sub ? "　" : ""}${W_NAME[other]}${os}`;
@@ -183,15 +245,16 @@ function wMorePage(d, drum) {
     </div>`;
 }
 
+// A mode page opens with what it was last set to: edits made in this session, else what the hub kept (the same on every phone),
+// else this phone's own copy, else the washer's defaults. Nothing is cached before it is edited, so the hub's answer is used the
+// moment it arrives.
 function wDraft(drum, mode) {
-  const k = drum + "/" + mode;
-  if (!W.drafts[k]) {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem("washer-draft:" + k) || "null"); } catch (e) { /* ignore */ }
-    W.drafts[k] = mode === "自定义" ? null : { ...W_DEFAULT, ...(saved || {}) };
-  }
   if (mode === "自定义") return W.info?.drums?.[drum]?.program ? { ...W_DEFAULT, ...W.info.drums[drum].program } : null;
-  return W.drafts[k];
+  const k = drum + "/" + mode;
+  if (W.drafts[k]) return W.drafts[k];
+  let saved = W.info?.modes?.[k] || null;
+  if (!saved) { try { saved = JSON.parse(localStorage.getItem("washer-draft2:" + k) || "null"); } catch (e) { /* ignore */ } }
+  return { ...W_DEFAULT, ...(W_MODE_DEFAULT[mode] || {}), ...(saved || {}) };
 }
 
 function wSetDraft(drum, mode, patch) {
@@ -203,7 +266,11 @@ function wSetDraft(drum, mode, patch) {
   } else {
     const k = drum + "/" + mode;
     W.drafts[k] = { ...wDraft(drum, mode), ...patch };
-    try { localStorage.setItem("washer-draft:" + k, JSON.stringify(W.drafts[k])); } catch (e) { /* ignore */ }
+    try { localStorage.setItem("washer-draft2:" + k, JSON.stringify(W.drafts[k])); } catch (e) { /* ignore */ }
+    // kept on the hub too, so the next opening - on any phone - is exactly this
+    if (W.info) (W.info.modes = W.info.modes || {})[k] = { ...W.drafts[k], dry_only: false };
+    api("/api/washer/modeparams", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ drum, mode, params: W.drafts[k] }) })
+      .catch(e => toast("没保存上：" + e.message));
   }
   scheduleRender();
 }
@@ -221,16 +288,19 @@ function wValText(key, p) {
 function wEstimate(drum, mode, p) {
   if (p?.dry_only && p.drying_level === "定时烘干") return p.drying_time;
   if (mode === "自定义" && p?.estimate_min) return p.estimate_min;
+  if (mode === "快速") return (W_QUICK.find(q => q[0] === p?.quick_level) || W_QUICK[1])[2];
   return null;
 }
 
 function wModePage(d, drum, mode) {
   const p = wDraft(drum, mode);
   const est = wEstimate(drum, mode, p);
-  const rows = !p ? `<div class="sheet-note">正在读取…</div>` : W_ROWS[drum].filter(k => !(p.dry_only && W_WASH_ONLY.has(k)) && !(mode === "自定义" && k === "dry_only")).map(k => {
+  const rows = !p ? `<div class="sheet-note">正在读取…</div>` : (W_MODE_ROWS[mode] || W_ROWS[drum]).filter(k => (k !== "blue_oxygen" || drum === "lower") && !(p.dry_only && W_WASH_ONLY.has(k)) && !(mode === "自定义" && k === "dry_only")).map(k => {
+    const ico = `<div class="pv-ico">${wRowIcon(k)}</div>`;
     if (["dry_only", "blue_oxygen", "steam", "high_water", "sleep_mode"].includes(k))
-      return `<div class="row"><div class="l">${W_LABEL[k]}</div><button class="sw ${p[k] ? "on" : ""}" data-w="sw" data-arg="${k}"></button></div>`;
-    return `<div class="row" data-w="pick" data-arg="${k}"><div class="l">${W_LABEL[k]}</div><div class="rv">${esc(wValText(k, p))}</div><span class="chev">›</span></div>`;
+      return `<div class="row pv">${ico}<div class="l">${W_LABEL[k]}</div><button class="sw ${p[k] ? "on" : ""}" data-w="sw" data-arg="${k}"></button></div>`;
+    return `<div class="row pv" data-w="pick" data-arg="${k}">${ico}<div class="l">${W_LABEL[k]}</div>
+      <span class="pv-v">${esc(wValText(k, p))}</span><span class="chev">›</span></div>`;
   }).join("");
   const ids = wIds(d, drum), s = val(ids.status), busyNow = wBusy(s);
   $("#app").innerHTML = `
@@ -239,10 +309,11 @@ function wModePage(d, drum, mode) {
       <div class="whero"><div class="mi big">${wIcon(mode)}</div>
         <div class="wt">${est ? `大约需要 ${est} 分钟` : "所需时间需称重计算"}</div>
         <div class="ws">${esc(W_DESC[mode] || "")}</div></div>
-      <div class="panel">${rows}</div>
+      <div class="panel">${mode === "快速" && p ? `<div class="wseg">${W_QUICK.map(([v, t]) => `<button class="${p.quick_level === v ? "on" : ""}" data-w="qlevel" data-arg="${v}">${t}</button>`).join("")}</div>` : ""}${rows}</div>
       <div class="wbottom">${busyNow ? `<div class="sheet-note">${W_NAME[drum]}现在是「${esc(s)}」，结束后才能开始新的</div>` : ""}
         <button class="wbig" data-w="book" ${busyNow || W.sending ? "disabled" : ""}>预约</button>
-        <button class="wbig pri" data-w="go" ${busyNow || W.sending ? "disabled" : ""}>${W.sending ? "正在启动…" : "开始"}</button></div>
+        <button class="wbig pri" data-w="go" ${busyNow || W.sending ? "disabled" : ""}>${W.sending ? "正在启动…" : "开始"}</button>
+        ${W.sending ? `<div class="wstage">${esc(W.stage || "正在连接…")}</div>` : ""}</div>
     </div>`;
 }
 
@@ -254,8 +325,9 @@ function wPick(drum, mode, key) {
   const opts = W_PICK[key];
   let cur = p[key];
   const draw = () => {
-    sheet(`<h3>${W_LABEL[key]}</h3><div class="wopts">${opts.map(([v, t, desc]) =>
-      `<button class="wopt ${String(v) === String(cur) ? "on" : ""}" data-w="opt" data-arg="${esc(v)}"><span>${esc(t)}${desc ? `<small>${esc(desc)}</small>` : ""}</span><i>✓</i></button>`).join("")}</div>
+    sheet(`<h3 class="wopt-h">${wRowIcon(key)}${W_LABEL[key]}</h3><div class="wopts">${opts.map(([v, t, desc]) =>
+      `<button class="wopt ${String(v) === String(cur) ? "on" : ""}" data-w="opt" data-arg="${esc(v)}">
+        <span>${esc(t)}${desc ? `<small>${esc(desc)}</small>` : ""}</span><i class="ck">✓</i></button>`).join("")}</div>
       <div class="sheet-btns"><button data-act="sheet-close">取消</button><button class="pri wpri" data-w="opt-ok">确定</button></div>`);
   };
   W.picker = { pick: v => { cur = typeof opts[0][0] === "number" ? Number(v) : v; draw(); }, ok: () => { closeSheet(); wSetDraft(drum, mode, { [key]: cur }); } };
@@ -263,40 +335,81 @@ function wPick(drum, mode, key) {
 }
 
 function wPickDrying(drum, mode, p) {
+  // Like Mijia: first choose the kind of drying; 智能烘干 then goes straight to the three degrees, 定时烘干 straight to the time.
   const levels = [["不烘干", "不烘干", "只洗不烘"], ["智能烘干", "智能烘干", "检测湿度，衣服干了就停"], ["定时烘干", "定时烘干", "自己定烘多久"]];
+  // 单烘干 takes 20-180 in steps of 10; drying after a wash only 30/60/90/120/180 (the washer refuses the rest)
+  const times = p.dry_only ? Array.from({ length: 17 }, (_, i) => 20 + i * 10) : [30, 60, 90, 120, 180];
+  if (!times.includes(p.drying_time)) p.drying_time = times.reduce((a, b) => Math.abs(b - p.drying_time) < Math.abs(a - p.drying_time) ? b : a);
+  let step = "kind";
+  const apply = () => { closeSheet(); wSetDraft(drum, mode, { drying_level: p.drying_level, drying_degree: p.drying_degree, drying_time: p.drying_time }); };
   const draw = () => {
-    const sub = p.drying_level === "智能烘干"
-      ? `<div class="sheet-group">烘干程度</div><div class="wopts">${W_DEGREE.map(([v, t, desc]) => `<button class="wopt ${p.drying_degree === v ? "on" : ""}" data-w="opt2" data-arg="${v}"><span>${t}<small>${desc}</small></span><i>✓</i></button>`).join("")}</div>`
-      : p.drying_level === "定时烘干"
-        ? `<div class="sheet-group">烘干时长</div><div class="chips">${[20, 30, 40, 50, 60, 70, 80, 90].map(m => `<button class="chip ${p.drying_time === m ? "on" : ""}" data-w="opt2" data-arg="${m}">${m} 分钟</button>`).join("")}</div>` : "";
-    sheet(`<h3>烘干时长</h3><div class="wopts">${levels.map(([v, t, desc]) =>
-      `<button class="wopt ${p.drying_level === v ? "on" : ""}" data-w="opt" data-arg="${v}"><span>${t}<small>${desc}</small></span><i>✓</i></button>`).join("")}</div>${sub}
-      <div class="sheet-btns"><button data-act="sheet-close">取消</button><button class="pri wpri" data-w="opt-ok">确定</button></div>`);
+    if (step === "kind") {
+      sheet(`<h3>烘干时长</h3><div class="wopts">${levels.map(([v, t, desc]) =>
+        `<button class="wopt ${p.drying_level === v ? "on" : ""}" data-w="opt" data-arg="${v}"><span>${t}<small>${desc}</small></span><i>✓</i></button>`).join("")}</div>
+        <div class="sheet-btns"><button data-act="sheet-close">取消</button></div>`);
+    } else if (step === "degree") {
+      sheet(`<h3>干衣度</h3><div class="wopts">${W_DEGREE.map(([v, t, desc]) =>
+        `<button class="wopt ${p.drying_degree === v ? "on" : ""}" data-w="opt2" data-arg="${v}"><span>${t}<small>${desc}</small></span><i>✓</i></button>`).join("")}</div>
+        <div class="sheet-btns"><button data-w="opt-back">返回</button><button class="pri wpri" data-w="opt-ok">确定</button></div>`);
+    } else {
+      sheet(`<h3>定时烘干</h3><div class="wwheels wone"><div class="wband"></div>${wWheelCol("dry", times, "分钟")}</div>
+        <div class="sheet-btns"><button data-w="opt-back">返回</button><button class="pri wpri" data-w="opt-ok">确定</button></div>`);
+      const w = document.querySelector("#sheet .wwheel[data-key=dry]");
+      if (w) wWheelInit(w, Math.max(0, times.indexOf(p.drying_time)), k => { p.drying_time = times[k]; });
+    }
   };
   W.picker = {
-    pick: v => { p.drying_level = v; draw(); },
-    pick2: v => { if (p.drying_level === "定时烘干") p.drying_time = Number(v); else p.drying_degree = v; draw(); },
-    ok: () => { closeSheet(); wSetDraft(drum, mode, { drying_level: p.drying_level, drying_degree: p.drying_degree, drying_time: p.drying_time }); },
+    pick: v => {
+      p.drying_level = v;
+      if (v === "不烘干") return apply();
+      step = v === "智能烘干" ? "degree" : "time";
+      draw();
+    },
+    pick2: v => { p.drying_degree = v; draw(); },
+    back: () => { step = "kind"; draw(); },
+    ok: apply,
   };
   draw();
 }
 
-// ---- 预约: three snapping wheels (今天/明天, 时, 分) like Mijia's 预计完成时间
+// ---- snapping wheels (预约's 今天/明天·时·分, 烘干时长): one look for every "pick a value" in the washer pages
 
 const W_ITEM = 44;
+const wWheelCol = (key, items, unit) => `<div class="wwheel" data-key="${key}"><div class="wpad"></div>${items.map((t, i) =>
+  `<div class="wit" data-i="${i}">${t}${unit ? `<sup>${unit}</sup>` : ""}</div>`).join("")}<div class="wpad"></div></div>`;
+
+/** Makes one .wwheel scroll-snap: starts at index `at`, calls pick(index) when it settles. */
+function wWheelInit(w, at, pick) {
+  const paint = () => {
+    const c = w.scrollTop / W_ITEM;
+    w.querySelectorAll(".wit").forEach(it => {
+      const dist = Math.abs(it.dataset.i - c);
+      it.style.opacity = Math.max(.12, 1 - dist * .3);
+      it.classList.toggle("on", dist < .5);
+    });
+  };
+  w.scrollTop = at * W_ITEM;
+  paint();
+  let t = 0;
+  w.addEventListener("scroll", () => {
+    paint();
+    clearTimeout(t);
+    t = setTimeout(() => pick(Math.max(0, Math.round(w.scrollTop / W_ITEM))), 90);
+  }, { passive: true });
+  w.addEventListener("click", e => { const it = e.target.closest(".wit"); if (it) w.scrollTo({ top: it.dataset.i * W_ITEM, behavior: "smooth" }); });
+}
 
 function wBookSheet(drum, mode) {
   const p = wDraft(drum, mode);
   const need = wEstimate(drum, mode, p) || 60;
   const now = new Date(), earliest = new Date(now.getTime() + need * 60000);
-  // Default to the usual 05:50 when that is still reachable, otherwise the earliest possible.
-  let pick = new Date(now); pick.setHours(5, 50, 0, 0);
+  // Default to the usual 06:00 (the cheap valley ends then) when that is still reachable, otherwise the earliest possible.
+  let pick = new Date(now); pick.setHours(6, 0, 0, 0);
   if (pick <= now) pick.setDate(pick.getDate() + 1);
   if (pick < earliest || pick - now > 24 * 3600000) pick = new Date(Math.ceil(earliest.getTime() / 60000) * 60000);
   const today = new Date(now); today.setHours(0, 0, 0, 0);
   const sel = { day: Math.round((new Date(pick).setHours(0, 0, 0, 0) - today) / 86400000), h: pick.getHours(), m: pick.getMinutes() };
-  const col = (key, items, unit) => `<div class="wwheel" data-key="${key}"><div class="wpad"></div>${items.map((t, i) =>
-    `<div class="wit" data-i="${i}">${t}${unit ? `<sup>${unit}</sup>` : ""}</div>`).join("")}<div class="wpad"></div></div>`;
+  const col = wWheelCol;
   sheet(`<h3>预计完成时间</h3><div class="wwarn" id="wwarn"></div>
     <div class="wwheels"><div class="wband"></div>${col("day", ["今天", "明天"], "")}${col("h", [...Array(24).keys()].map(x => String(x).padStart(2, "0")), "时")}${col("m", [...Array(60).keys()].map(x => String(x).padStart(2, "0")), "分")}</div>
     <div class="sheet-note" id="wbooknote">${mode === "自定义" ? `程序约 ${need} 分钟` : "按洗衣机预估的时长倒推开始时间"}</div>
@@ -310,23 +423,7 @@ function wBookSheet(drum, mode) {
   };
   document.querySelectorAll("#sheet .wwheel").forEach(w => {
     const key = w.dataset.key;
-    const paint = () => {
-      const c = w.scrollTop / W_ITEM;
-      w.querySelectorAll(".wit").forEach(it => {
-        const dist = Math.abs(it.dataset.i - c);
-        it.style.opacity = Math.max(.12, 1 - dist * .3);
-        it.classList.toggle("on", dist < .5);
-      });
-    };
-    w.scrollTop = sel[key] * W_ITEM;
-    paint();
-    let t = 0;
-    w.addEventListener("scroll", () => {
-      paint();
-      clearTimeout(t);
-      t = setTimeout(() => { sel[key] = Math.max(0, Math.round(w.scrollTop / W_ITEM)); check(); }, 90);
-    }, { passive: true });
-    w.addEventListener("click", e => { const it = e.target.closest(".wit"); if (it) w.scrollTo({ top: it.dataset.i * W_ITEM, behavior: "smooth" }); });
+    wWheelInit(w, sel[key], i => { sel[key] = i; check(); });
   });
   check();
   W.booking = { drum, mode };
@@ -338,7 +435,7 @@ function wBookSheet(drum, mode) {
 // check that it took the right program, comes ~10 s later.
 // flipped(): true once the live state already shows the drum booked - often before the job says so,
 // and the moment the washer beeps; that counts as booked too.
-async function wJob(path, body, onBooked, flipped) {
+async function wJob(path, body, onBooked, flipped, onStage) {
   const { job } = await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   let told = false;
   const tell = b => { if (!told) { told = true; onBooked?.(b); } };
@@ -348,11 +445,19 @@ async function wJob(path, body, onBooked, flipped) {
     if (i % 3 !== 2) continue;   // ask the hub every 0.6 s
     try {
       const j = await api("/api/washer/job/" + job);
+      if (j.stage && !j.done) onStage?.(j.stage);
       if (j.booked?.ok) tell(j.booked);
       if (j.done) return j.result;
     } catch (e) { if (/no such job/.test(e.message)) throw new Error("服务重启了，结果丢了，请看洗衣机状态"); }
   }
   throw new Error("等了 5 分钟还没结果，请看洗衣机状态");
+}
+
+// what the hub says it is doing right now, shown as small text while a start / booking runs
+function wStage(text, drum) {
+  if (drum) { if (W.stages?.[drum] === text) return; W.stages = { ...(W.stages || {}), [drum]: text }; }
+  else { if (W.stage === text) return; W.stage = text; }
+  scheduleRender();
 }
 
 const wBookedNow = (d, drum) => { const x = wIds(d, drum); return isOn(x.power) && ["预约中", "工作中"].includes(val(x.status)); };
@@ -374,7 +479,7 @@ function wFailSheet(title, r) {
     <div class="sheet-btns"><button class="pri wpri" data-act="sheet-close">知道了</button></div>`);
 }
 
-// ---- home-page card: 「上」「下」 each books that drum on 自定义, done before 05:50
+// ---- home-page card: 「上」「下」 each books that drum on 自定义, done by 06:00
 
 W.quick = {};
 
@@ -389,7 +494,10 @@ function washerCardButtons(d) {
 // The washer card fills from the left, orange, as the days (or washes) since the last finished 筒清洁 pass:
 // full at 30. Whichever drum is further along sets it.
 function washerCleanFill() {
-  const p = Math.max(...["upper", "lower"].map(k => W.info?.drums?.[k]?.clean?.progress ?? 0));
+  // Paint the last known value immediately, then refresh it in the background. This avoids
+  // a white-to-orange flash every time the app's WebView is reopened.
+  wLoadInfo();
+  const p = Math.max(...["upper", "lower"].map(k => W.info?.drums?.[k]?.clean?.progress ?? W.cleanProgress?.[k] ?? 0));
   if (!p) return "";
   const pct = Math.round(p * 100);
   return `;background-image:linear-gradient(90deg, rgba(255,138,40,${(.16 + .26 * p).toFixed(2)}) ${pct}%, transparent ${pct}%)`;
@@ -398,10 +506,10 @@ function washerCleanFill() {
 function washerSummary(d) {
   wLoadInfo();
   const ids = wIds(d, "upper");
-  if (!isOn(ids.power)) return Object.values(W.quick).some(Boolean) ? "正在预约…" : "已关机";
+  if (!isOn(ids.power)) { const k = Object.keys(W.quick).find(x => W.quick[x]); return k ? (W.stages?.[k] || "正在预约…") : "已关机"; }
   const parts = ["upper", "lower"].map(k => {
     const x = wIds(d, k), s = val(x.status), eta = W.info?.drums?.[k]?.finish_eta, n = k === "upper" ? "上" : "下";
-    if (W.quick[k]) return `${n}正在约`;
+    if (W.quick[k]) return W.stages?.[k] ? `${n}：${W.stages[k]}` : `${n}正在约`;
     if (s === "预约中") return `${n}约${eta || "好了"}`;
     if (s === "工作中") return `${n}剩${minutes(x.left) || "…"}`;
     if (s === "暂停中") return `${n}暂停`;
@@ -420,12 +528,14 @@ async function wQuick(d, drum) {
   W.quick[drum] = true; scheduleRender();   // the button pulses; no "正在约" message
   let told = false;
   try {
+    W.stages = { ...(W.stages || {}), [drum]: "正在把请求发给家里…" };
     const r = await wJob("/api/washer/quick", { drum }, b => {
       told = true; W.quick[drum] = false;
       toast(b.plan?.washer_finish ? `${name}约好了，${b.plan.washer_finish} 左右洗完烘干` : `${name}约好了`);
       wShowBooked(d, drum, b.result_status || val(wIds(d, drum).status) || "预约中");
-    }, () => wBookedNow(d, drum));
-    if (!r.ok) wFailSheet(told ? `${name}刚才约上了，但核对没通过` : `${name}没约上`, r);
+    }, () => wBookedNow(d, drum), t => wStage(t, drum));
+    if (r.cancelled) toast(`${name}已取消`);
+    else if (!r.ok) wFailSheet(told ? `${name}刚才约上了，但核对没通过` : `${name}没约上`, r);
     else if (!told) toast(`${name}约好了，${r.plan?.washer_finish || ""} 左右洗完烘干`);
   } catch (e) {
     toast(`${name}：${e.message}`);
@@ -447,7 +557,7 @@ async function wSend(drum, mode, finishAt) {
   if (W.sending) return;
   const p = wDraft(drum, mode);
   if (!p) return;
-  W.sending = true; scheduleRender();
+  W.sending = true; W.stage = "正在把请求发给家里…"; scheduleRender();
   const iso = t => { const z = -t.getTimezoneOffset(), pad = n => String(Math.abs(n)).padStart(2, "0");
     return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}:00${z >= 0 ? "+" : "-"}${pad(Math.trunc(z / 60))}:${pad(z % 60)}`; };
   try {
@@ -457,14 +567,19 @@ async function wSend(drum, mode, finishAt) {
       W.sending = false;
       toast(finishAt ? `${W_NAME[drum]}已预约，${finishAt.toTimeString().slice(0, 5)} 前洗完` : `${W_NAME[drum]}开始洗了`);
       W.drum = drum;
+      if (wDraft(drum, mode)?.dry_only) wSetDraft(drum, mode, { dry_only: false });
       if (d) wShowBooked(d, drum, finishAt ? "预约中" : "工作中");
       if (/\/(m|more)\//.test(location.hash)) history.back();
     };
     let told = false;
     const r = await wJob("/api/washer/start", { drum, mode, program, finish_at: finishAt ? iso(finishAt) : null },
-      b => { if (b.ok) { told = true; done(); } }, () => !!d && wBookedNow(d, drum));
+      b => { if (b.ok) { told = true; done(); } }, () => !!d && wBookedNow(d, drum), wStage);
     W.sending = false;
-    if (!r.ok) {
+    if (r.cancelled) {
+      toast(`${W_NAME[drum]}已取消`);
+      if (d) wShowBooked(d, drum, "待机中");
+      scheduleRender();
+    } else if (!r.ok) {
       wFailSheet(told ? `${W_NAME[drum]}刚才约上了，但核对没通过` : `${W_NAME[drum]}没${finishAt ? "约" : "开始"}上`, r);
       scheduleRender();
     } else if (!told) done();
@@ -542,10 +657,12 @@ document.addEventListener("click", e => {
     wSetDraft(drum, mode, patch);
     return;
   }
+  if (w === "qlevel") { wSetDraft(drum, mode, { quick_level: arg }); return; }
   if (w === "pick") { wPick(drum, mode, arg); return; }
   if (w === "opt") { W.picker?.pick(arg); return; }
   if (w === "opt2") { W.picker?.pick2?.(arg); return; }
   if (w === "opt-ok") { W.picker?.ok(); return; }
+  if (w === "opt-back") { W.picker?.back?.(); return; }
   if (w === "book") { wBookSheet(drum, mode); return; }
   if (w === "book-go") { const at = W.bookAt, b = W.booking; if (!at || !b) return; closeSheet(); wSend(b.drum, b.mode, at); return; }
   if (w === "go") { wSend(drum, mode, null); return; }

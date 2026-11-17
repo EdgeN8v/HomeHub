@@ -29,8 +29,9 @@ const fmtNum = v => (Math.round(v * 10) / 10).toString();
 // Inside the app (1.8+) every request is relayed by the app, which can't read request bodies, so a
 // POST also carries its JSON body base64'd in X-HH-Body. Harmless for the server and older apps.
 function withBody(opts) {
-  if (!opts?.body) return opts;
-  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(opts.body)));
+  if (!opts || String(opts.method || "GET").toUpperCase() !== "POST") return opts;
+  const body = opts.body ?? "";
+  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(body)));
   return { ...opts, headers: { ...(opts.headers || {}), "X-HH-Body": b64 } };
 }
 
@@ -40,7 +41,31 @@ async function api(path, opts) {
   return r.json();
 }
 
+// The camera is not an HA device: it is added to the model here (only inside the phone app, which has the native player) so it is a card
+// like any other - long-press, drag, move to another room, rename, delete. Its name / room / hidden live in /api/cam/prefs.
+const CAM_ID = "cam:c700";
+function injectCam(m) {
+  if (!window.HomeHubApp?.openCamera) return;
+  if (!S.camPrefs) { try { S.camPrefs = JSON.parse(localStorage.getItem("cam-prefs") || "{}"); } catch (e) { S.camPrefs = {}; } }
+  const p = S.camPrefs, home = m.homes.find(h => h.rooms.includes(p.room || "卧室")) || m.homes[0];
+  // the same camera also comes in from Mijia's cloud list: one card only, this one
+  m.devices = m.devices.filter(d => d.id !== CAM_ID && !(d.kind === "camera" && /chuangmi\.camera/.test(d.model || "")));
+  m.hidden = (m.hidden || []).filter(i => i !== CAM_ID);
+  if (!home) return;
+  m.devices.unshift({ id: CAM_ID, name: p.name || "小米智能摄像机 C700", model: "chuangmi.camera.81ac1", kind: "camera", kind_name: "摄像头",
+    home: home.name, room: home.rooms.includes(p.room) ? p.room : (home.rooms.includes("卧室") ? "卧室" : home.rooms[0]),
+    roles: {}, toggles: [], features: [], more: [], events: [], entities: [] });
+  if (p.hidden) m.hidden.push(CAM_ID);
+}
+async function camPref(patch) {
+  S.camPrefs = { ...(S.camPrefs || {}), ...patch };
+  try { localStorage.setItem("cam-prefs", JSON.stringify(S.camPrefs)); } catch (e) { /* ignore */ }
+  try { await api("/api/cam/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }); }
+  catch (e) { toast("没保存上：" + e.message); }
+}
+
 function apply(m) {
+  injectCam(m);
   S.model = m;
   S.states = m.states;
   S.byId = Object.fromEntries(m.devices.map(d => [d.id, d]));
@@ -65,7 +90,9 @@ const PHONE = (() => {
 
 async function load(fresh) {
   const q = [PHONE ? "phone=" + encodeURIComponent(PHONE) : "", fresh ? "fresh=1" : ""].filter(Boolean).join("&");
-  const m = await api("/api/home" + (q ? "?" + q : ""));
+  const [m, prefs] = await Promise.all([api("/api/home" + (q ? "?" + q : "")),
+    window.HomeHubApp?.openCamera ? api("/api/cam/prefs").catch(() => null) : null]);
+  if (prefs) { S.camPrefs = prefs; try { localStorage.setItem("cam-prefs", JSON.stringify(prefs)); } catch (e) { /* ignore */ } }
   apply(m);
   try { localStorage.setItem("home-snapshot", JSON.stringify(m)); } catch (e) { /* storage full or disabled: just no instant start */ }
 }
@@ -164,6 +191,23 @@ function deviceOffline(d) {
   return ids.length > 0 && ids.every(id => dead(val(id)));
 }
 
+// FLIP: remember where each element is, make the change, then glide every element from where it was to where it is
+// now. This is what makes reordering look like cards sliding aside instead of jumping.
+function flipAnimate(els, mutate, ms = 280) {
+  const before = new Map(els.map(e => [e, e.getBoundingClientRect()]));
+  mutate();
+  for (const e of els) {
+    if (!e.isConnected) continue;
+    const a = before.get(e), b = e.getBoundingClientRect(), dx = a.left - b.left, dy = a.top - b.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    e.style.transition = "none"; e.style.transform = `translate(${dx}px, ${dy}px)`;
+    void e.offsetWidth;
+    e.style.transition = `transform ${ms}ms cubic-bezier(.2, .8, .25, 1)`; e.style.transform = "";
+    const done = () => { e.style.transition = ""; e.removeEventListener("transitionend", done); };
+    e.addEventListener("transitionend", done);
+  }
+}
+
 const KITCHEN_KINDS = { fryer: 1, microwave: 1, pressure_cooker: 1, ihcooker: 1 };
 
 function deviceActive(d) {
@@ -234,14 +278,25 @@ function summary(d, short = false) {
   }
   if (k === "fan") { const f = st(r.main); return { text: f.s !== "on" ? "已关闭" : (f.a.preset_mode || (f.a.percentage != null ? `风速 ${f.a.percentage}%` : "已开启")) }; }
   if (k === "humidifier") { const h = st(r.main); return { text: h.s !== "on" ? "已关闭" : `目标湿度 ${h.a.humidity ?? "—"}%` }; }
-  if (k === "water_heater") return { text: [val(r.status), st(r.main).a.temperature != null ? `${st(r.main).a.temperature}°` : ""].filter(Boolean).join(" · ") || "—" };
+  if (k === "water_heater") {
+    const a = st(r.main).a, x = d.wh || {};
+    return { text: [val(r.status), x.sterilize && isOn(x.sterilize) && "除菌中", x.anti_icing && val(x.anti_icing) === "Antifreeze" && "防冻中",
+      a.temperature != null ? `${fmtNum(a.temperature)}°` : "",
+      !short && a.current_temperature != null ? `水温${fmtNum(a.current_temperature)}°` : ""].filter(Boolean).join(" · ") || "—" };
+  }
   if (k === "bath_heater") { const on = d.toggles.filter(t => isOn(t.entity_id)).map(t => t.label); return { text: on.length ? on.join(" · ") : "已关闭" }; }
   if (k === "switch" || k === "plug") {
     if (d.toggles.length > 1) { const n = d.toggles.filter(t => isOn(t.entity_id)).length; return { text: n ? `${n} 路开着` : "已关闭" }; }
     const on = d.toggles[0] && isOn(d.toggles[0].entity_id);
     return { text: (on ? "已开启" : "已关闭") + (on && r.power && num(r.power) ? ` · ${sensorText(r.power)}` : "") };
   }
-  if (k === "lock") return { text: [val(r.status), r.battery && `电量 ${sensorText(r.battery)}`].filter(Boolean).join(" · "), warn: val(r.status) === "门虚掩" };
+  if (k === "lock") {
+    // The lock reports "门虚掩" right after a lock/unlock but never says the door got closed later, so the
+    // warning only lasts 10 minutes from that report; after that it is just a note.
+    const ajar = val(r.status) === "门虚掩", since = ajar ? Date.parse(st(r.status).t) : NaN;
+    const fresh = ajar && !(Date.now() - since > 10 * 60 * 1000);
+    return { text: [fresh || !ajar ? val(r.status) : "门虚掩（已超 10 分钟，不再报警）", r.battery && `电量 ${sensorText(r.battery)}`].filter(Boolean).join(" · "), warn: fresh };
+  }
   if (k === "presence") return { text: binaryText(r.occupancy) + (r.illuminance ? ` · ${sensorText(r.illuminance)}` : "") };
   if (k === "contact") return { text: binaryText(r.door) };
   if (k === "flood") return { text: binaryText(r.moisture), warn: val(r.moisture) === "on" };
@@ -296,6 +351,7 @@ function headerStats(room, devs = homeDevices()) {
   const stats = [
     avg("temperature") && `<div class="stat tap" data-act="temps" role="button">${icon("thermo")}${avg("temperature")}°</div>`,
     avg("humidity") && `<div class="stat">${icon("humidifier")}${avg("humidity")}%</div>`,
+    `<div class="stat tap" data-act="energy" role="button">${icon("bolt")}<span class="enow">${typeof enChipText === "function" ? enChipText() : "用电"}</span></div>`,
     `<div class="stat tap" data-act="lights" role="button">${icon("light")}亮灯 ${lightsOn}</div>`,
     guards.length && `<div class="stat ${alarms.length ? "warn" : ""}">${icon(alarms.length ? "alert" : "shield")}${alarms.length ? "有报警" : "安全"}</div>`,
   ].filter(Boolean).join("");
@@ -340,6 +396,139 @@ function renderHome() {
 // arranged on that room's tab.
 const allDevices = (devs, rooms) => rooms.flatMap(r => ordered(devs.filter(d => d.room === r), r));
 
+// The camera card, like Mijia's: the last picture with a play button (plays right here), and the latest movements (tap = that clip, here too).
+// The picture itself is the phone's native player laid over this card (see camInline); the events and the still come from the hub's recorder.
+// The last answers are kept on the phone, so the card comes up at once as it was (power, latest movements) and is then updated.
+function camSave() { try { localStorage.setItem("cam-last", JSON.stringify({ cam: S.cam, power: S.camPower })); } catch (e) { /* ignore */ } }
+function camLoad(force) {
+  if (S.cam === undefined) {
+    try { const c = JSON.parse(localStorage.getItem("cam-last") || "null"); if (c) { S.cam = c.cam; S.camPower = null; S.camState = "checking"; } } catch (e) { /* ignore */ }
+  }
+  if (!force && S.camAt && Date.now() - S.camAt < 15000) return;
+  S.camAt = Date.now();
+  const redraw = () => { if (!S.edit && !drag.active && !S.camInl) scheduleRender(); };
+  api("/api/cam/events").then(r => {
+    const same = JSON.stringify((S.cam?.events || []).slice(0, 3)) === JSON.stringify((r.events || []).slice(0, 3));
+    S.cam = r; camSave(); if (!same) redraw();
+  }).catch(() => {});
+  api("/api/cam/power").then(r => {
+    const state = r.online === false ? "offline" : typeof r.on !== "boolean" ? "unknown" : r.on ? "online" : "sleeping";
+    if (S.camPower !== r.on || S.camState !== state) { S.camPower = r.on; S.camState = state; camSave(); redraw(); }
+  }).catch(() => { S.camPower = null; S.camState = "unknown"; redraw(); });
+  // the newest picture (the hub takes one every 30 s while the camera is on): fetched off-screen, then swapped in - no flash
+  camPicFetch("latest", "/api/cam/file/latest.jpg?t=" + Math.floor(Date.now() / 15000), 720, true);
+}
+
+// The card's pictures are kept in the page itself, small (a few dozen KB), as data: URLs - so the card is drawn complete in its very
+// first frame, never grey. A movement's thumbnail is fetched once, when the movement is new; the big picture is renewed in the background.
+const CAM_PICS = (() => { try { return JSON.parse(localStorage.getItem("cam-pics") || "{}"); } catch (e) { return {}; } })();
+const camPicBusy = {};
+function camPic(key, url, w) {
+  if (CAM_PICS[key]) return CAM_PICS[key];
+  camPicFetch(key, url, w, false);
+  return url;
+}
+function camPicFetch(key, url, w, swap) {
+  if (camPicBusy[key]) return;
+  camPicBusy[key] = true;
+  const im = new Image();
+  im.onload = () => {
+    camPicBusy[key] = false;
+    try {
+      const c = document.createElement("canvas"), k = Math.min(1, w / im.naturalWidth);
+      c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+      c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+      const data = c.toDataURL("image/jpeg", 0.72);
+      if (CAM_PICS[key] === data) return;
+      CAM_PICS[key] = data;
+      // keep only what the card shows: the big picture and the three latest movements
+      const keep = new Set(["latest", ...(S.cam?.events || []).slice(0, 3).map(e => e.id)]);
+      for (const k2 of Object.keys(CAM_PICS)) if (!keep.has(k2)) delete CAM_PICS[k2];
+      try { localStorage.setItem("cam-pics", JSON.stringify(CAM_PICS)); } catch (e) { /* full: next time */ }
+      if (S.camInl) return;
+      document.querySelectorAll(`[data-pic="${key}"]`).forEach(el => { el.src = data; });
+    } catch (e) { /* ignore */ }
+  };
+  im.onerror = () => { camPicBusy[key] = false; };
+  im.src = url;
+}
+const camHM = ts => { const t = new Date(ts * 1000); return String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0"); };
+
+function camCard(d) {
+  camLoad(false);
+  const evs = (S.cam?.events || []).slice(0, 3);
+  // like Mijia: the picture fills the card edge to edge with the name and 进入 on it; the latest movements under it, 〉 = all of them
+  return `<div class="card camcard" data-dev="${d.id}" role="button">
+    ${S.camPower !== true
+      ? `<div class="cam-view cam-off" data-act="cam-wake"><img data-pic="latest" src="${camPic("latest", "/api/cam/file/latest.jpg", 720)}" onerror="this.style.display='none'">
+          <div class="cam-hd"><b>${esc(d.name)}</b><span class="cam-go" data-act="cam-open">进入 ›</span></div>
+          <div class="cam-offin">${S.camWaking ? `<span class="cam-wakebtn busy"></span><em>正在开启…</em>`
+            : `<span class="cam-wakebtn">${icon("power")}</span><em>${S.camState === "sleeping" ? "摄像头已关闭，点按开启" : S.camState === "offline" ? "摄像头离线 · 点击重试" : S.camState === "unknown" ? "无法连接摄像头 · 点击重试" : "正在确认摄像头状态"}</em>`}</div></div>`
+      : `<div class="cam-view cam-preview" data-act="cam-play"><img data-pic="latest" src="${camPic("latest", "/api/cam/file/latest.jpg", 720)}" onerror="this.style.display='none'">
+          <div class="cam-hd"><b>${esc(d.name)}</b><span class="cam-go" data-act="cam-open">进入 ›</span></div>
+          <span class="cam-play">▶</span><span class="cam-still-label">上次画面 · 点击播放</span></div>`}
+    <div class="cam-ev">${evs.map(e => `<div class="cam-th" data-act="cam-clip" data-arg="${esc(e.id)}|${esc(e.clip || e.id + ".mp4")}">
+      ${e.thumb ? `<img data-pic="${esc(e.id)}" src="${camPic(e.id, "/api/cam/file/" + e.thumb, 360)}">` : ""}<span>${camHM(e.ts)}</span></div>`).join("") || (S.cam ? `<div class="cam-none">还没有移动记录</div>` : `<div class="cam-th"></div><div class="cam-th"></div><div class="cam-th"></div>`)}
+      <div class="cam-more" data-act="cam-all">${evs.length ? "›" : ""}</div></div>
+    <div class="selmark">${icon("check")}</div>
+  </div>`;
+}
+
+// every movement the hub recorded, newest first, by day
+function camAll() {
+  const evs = S.cam?.events || [], days = [];
+  const label = ts => { const t = new Date(ts * 1000), n = new Date(); const dd = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()) - new Date(t.getFullYear(), t.getMonth(), t.getDate())) / 864e5);
+    return dd === 0 ? "今天" : dd === 1 ? "昨天" : `${t.getMonth() + 1}月${t.getDate()}日`; };
+  for (const e of evs) { const l = label(e.ts); let g = days[days.length - 1]; if (!g || g.l !== l) days.push(g = { l, es: [] }); g.es.push(e); }
+  sheet(`<h3>移动记录</h3><div class="cam-all">${days.map(g => `<div class="cam-day">${g.l}</div><div class="cam-grid">${g.es.map(e =>
+    `<div class="cam-th" data-act="cam-clipfull" data-arg="${esc(e.id)}|${esc(e.clip || "")}">${e.thumb ? `<img src="/api/cam/file/${esc(e.thumb)}">` : ""}<span>${camHM(e.ts)} · ${e.dur || 1}秒</span></div>`).join("")}</div>`).join("")
+    || `<p class="sheet-note">还没有记录。有人或宠物在画面里走动时，这里会出现。</p>`}</div>`);
+}
+
+// Plays the live picture or a clip inside the card: the native player is laid over the card's picture box and follows it while the page
+// scrolls. Back / another room / leaving the page / the clip ending all put the still picture back.
+// switching on from the card: the camera needs a few seconds to raise its head, then the live picture starts in the card
+async function camWake() {
+  if (S.camWaking) return;
+  S.camWaking = true; scheduleRender();
+  try {
+    const state = await api("/api/cam/power");
+    if (state.online === false || typeof state.on !== "boolean") { S.camState = "offline"; throw new Error("摄像头离线，请检查供电和网络"); }
+    if (!state.on) {
+      const result = await api("/api/cam/power?on=1", { method: "POST" });
+      if (result.on !== true) throw new Error("摄像头未确认开启");
+    }
+    S.camPower = true; S.camState = "online"; camSave(); scheduleRender();
+    setTimeout(() => { S.camWaking = false; camInline(""); }, 3500);
+  } catch (e) { S.camWaking = false; scheduleRender(); toast("没开成：" + e.message); }
+}
+function camInline(clip) {
+  if (!clip && S.camPower !== true) { camWake(); return; }
+  const el = document.querySelector(".roomview.cur .cam-view");
+  if (!el || !HomeHubApp.playInline) { HomeHubApp.openCamera("c700", clip || ""); return; }
+  if (S.camInl) { if (clip) { camStop(); } else { HomeHubApp.camTap(); return; } }     // playing already: a tap on the picture shows / hides the buttons
+  const r = el.getBoundingClientRect(), card = el.closest(".card");
+  S.camInl = { room: S.room, key: "" };
+  HomeHubApp.playInline("c700", clip || "", r.left, r.top, r.width, r.height, S.byId[CAM_ID]?.name || "", parseFloat(getComputedStyle(card).borderTopLeftRadius) || 20);
+  requestAnimationFrame(camTrack);
+}
+function camTrack() {
+  if (!S.camInl) return;
+  const el = document.querySelector(".roomview.cur .cam-view");
+  if (!el || S.room !== S.camInl.room || S.edit || !document.querySelector("#app .page .tabs")) return camStop();
+  const r = el.getBoundingClientRect(), top = (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sat")) || 0) + 8;
+  const vis = r.top >= top && r.bottom <= innerHeight - 70;
+  const key = [r.left, r.top, r.width, r.height, vis].join();
+  if (key !== S.camInl.key) { S.camInl.key = key; HomeHubApp.moveInline(r.left, r.top, r.width, r.height, vis); }
+  requestAnimationFrame(camTrack);
+}
+function camStop() {
+  if (!S.camInl) return;
+  S.camInl = null;
+  try { HomeHubApp.stopInline(); } catch (e) { /* older app */ }
+}
+window.hhCamEnded = camStop;
+
 function roomPage(room, devs, rooms) {
   const list = room === "全部" ? allDevices(devs, rooms) : devs.filter(d => d.room === room);
   const offlineLast = ds => [...ds.filter(d => !S.offIds?.has(d.id)), ...ds.filter(d => S.offIds?.has(d.id))];
@@ -358,7 +547,7 @@ function ordered(ds, room) {
   const saved = S.model.order?.[orderKey(room)];
   if (!saved) return ds;
   const pos = new Map(saved.map((id, i) => [id, i]));
-  return [...ds].sort((a, b) => (pos.get(a.id) ?? 1e6 + ds.indexOf(a)) - (pos.get(b.id) ?? 1e6 + ds.indexOf(b)));
+  return [...ds].sort((a, b) => (pos.get(a.id) ?? (a.kind === "camera" ? -1 : 1e6 + ds.indexOf(a))) - (pos.get(b.id) ?? (b.kind === "camera" ? -1 : 1e6 + ds.indexOf(b))));
 }
 
 // ---------------------------------------------------------------- edit mode (long press), like Mijia
@@ -436,9 +625,10 @@ document.addEventListener("touchmove", e => {
   drag.card.style.left = drag.x - drag.dx + "px";
   drag.card.style.top = drag.y - drag.dy + "px";
   const over = document.elementFromPoint(drag.x, drag.y)?.closest(".card");
-  if (!over || over === drag.ph || over.parentElement !== drag.grid) return;
+  if (!over || over === drag.ph || over.parentElement !== drag.grid || performance.now() < (drag.lock || 0)) return;
+  drag.lock = performance.now() + 260;                    // let the cards finish sliding first, else the one under the finger keeps swapping
   const kids = [...drag.grid.children];
-  drag.grid.insertBefore(drag.ph, kids.indexOf(drag.ph) < kids.indexOf(over) ? over.nextSibling : over);
+  flipAnimate(kids.filter(c => c !== drag.card), () => drag.grid.insertBefore(drag.ph, kids.indexOf(drag.ph) < kids.indexOf(over) ? over.nextSibling : over));
 }, { passive: false });
 
 // The card leaves its grid for <body> while carried: the room view is transformed (swipe animation),
@@ -450,6 +640,7 @@ function startDrag(c) {
   drag.ph = document.createElement("div");
   drag.ph.className = "card ph";
   drag.ph.style.height = r.height + "px";
+  drag.ph.style.gridColumn = getComputedStyle(c).gridColumn;
   drag.grid.insertBefore(drag.ph, c);
   document.body.appendChild(c);
   Object.assign(c.style, { position: "fixed", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px", zIndex: 100, margin: 0 });
@@ -466,12 +657,18 @@ function endTouch() {
   drag.pending = null;
   if (!drag.active) return;
   cancelAnimationFrame(drag.raf);
-  const { card, ph, grid } = drag;
-  grid.insertBefore(card, ph); ph.remove();
-  card.style.cssText = drag.css;
-  card.classList.remove("lifted");
+  const { card, ph, grid } = drag, css = drag.css;
   drag.active = false; drag.swallowClick = true;
-  saveOrder(grid.dataset.order, [...grid.querySelectorAll(".card[data-dev]")].map(c => c.dataset.dev));
+  const r = ph.getBoundingClientRect();
+  card.classList.remove("lifted");
+  card.style.transition = "left .2s cubic-bezier(.2, .8, .25, 1), top .2s cubic-bezier(.2, .8, .25, 1), transform .2s";   // glide into the gap
+  card.style.left = r.left + "px"; card.style.top = r.top + "px";
+  setTimeout(() => {
+    if (!ph.isConnected) return;
+    grid.insertBefore(card, ph); ph.remove();
+    card.style.cssText = css;
+    saveOrder(grid.dataset.order, [...grid.querySelectorAll(".card[data-dev]")].map(c => c.dataset.dev));
+  }, 210);
 }
 
 function saveOrder(key, ids) {
@@ -514,7 +711,9 @@ async function editMoveTo(room) {
   const ids = [...S.edit];
   closeSheet();
   try {
-    await api("/api/device/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_ids: ids, home: S.home, room }) });
+    if (ids.includes(CAM_ID)) { await camPref({ room }); apply(S.model); }
+    const rest = ids.filter(i => i !== CAM_ID);
+    if (rest.length) await api("/api/device/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_ids: rest, home: S.home, room }) });
     toast(`已移到${room}`);
   } catch (e) { toast("移动失败：" + e.message); }
   exitEdit(); load().catch(() => {});
@@ -533,7 +732,8 @@ async function editRenameSave() {
   if (!name) return toast("名字不能为空");
   closeSheet();
   try {
-    await api("/api/device/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: id, name }) });
+    if (id === CAM_ID) { await camPref({ name }); apply(S.model); }
+    else await api("/api/device/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: id, name }) });
   } catch (e) { toast("重命名失败：" + e.message); }
   exitEdit(); load().catch(() => {});
 }
@@ -550,7 +750,8 @@ async function setHidden(ids, hidden) {
   ids.forEach(id => hidden ? set.add(id) : set.delete(id));
   S.model.hidden = [...set];
   try {
-    await api("/api/device/hide", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_ids: ids, hidden }) });
+    if (ids.includes(CAM_ID)) { await camPref({ hidden }); ids = ids.filter(i => i !== CAM_ID); }
+    if (ids.length) await api("/api/device/hide", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_ids: ids, hidden }) });
   } catch (e) { toast("没保存上：" + e.message); }
 }
 
@@ -571,8 +772,11 @@ function publicAddressSheet() {
   sheet(`<h3>公网地址</h3>
     <p class="sheet-note" style="text-align:left">不在家时 App 用这个地址连家里。写域名就行，端口不写就沿用现在的；改完会马上重新测一次连不连得上。</p>
     <input id="pubin" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" value="${esc(HomeHubApp.publicUrl().replace("https://", ""))}" style="margin-top:12px">
-    <div class="sheet-btns"><button data-act="pub-reset">恢复默认</button><button class="pri" data-act="pub-save">保存</button></div>`);
+    <div id="pubres" class="pubres"></div>
+    <div class="sheet-btns"><button data-act="pub-reset">恢复默认</button><button data-act="pub-test">测试连接</button><button class="pri" data-act="pub-save">保存</button></div>
+    <p class="sheet-note" style="text-align:left">在家里用 Wi-Fi 测，有些路由器不让手机从里面绕出去再连回来，会显示失败；用 5G 测最准。</p>`);
 }
+window.hhTest = (id, r) => { const el = $("#pubres"); if (el) { el.textContent = r.msg; el.className = "pubres " + (r.ok ? "ok" : "bad"); } };
 
 async function addDeviceSheet() {
   sheet(`<h3>添加设备</h3>
@@ -667,6 +871,17 @@ async function syncXiaomi(btn) {
 // ---- bottom sheet
 
 function sheet(html, cls = "") {
+  // A sheet that is already up is updated where it stands (picking 20 instead of 10 minutes redraws the same card) - it must not
+  // slide up again. Only a sheet opened from nothing animates in.
+  const old = $("#sheet");
+  if (old && $("#sheet-mask")) {
+    const title = old.querySelector("h3")?.textContent, top = old.scrollTop;
+    S.pop = null;
+    old.className = cls; old.style.animation = "none"; old.style.transform = ""; old.style.transition = "";
+    old.innerHTML = html;
+    old.scrollTop = old.querySelector("h3")?.textContent === title ? top : 0;
+    return;
+  }
   closeSheet();
   document.body.insertAdjacentHTML("beforeend", `<div id="sheet-mask" data-act="sheet-close"></div><div id="sheet" class="${cls}">${html}</div>`);
 }
@@ -976,10 +1191,11 @@ const WEATHER = { sunny: "☀️", "clear-night": "🌙", partlycloudy: "⛅", c
 function weatherHtml() {
   const w = S.model.weather && st(S.model.weather);
   if (!w || dead(w.s) || w.a.temperature == null) return "";
-  return `<div class="weather"><span class="wi">${WEATHER[w.s] ?? "🌡️"}</span>${Math.round(w.a.temperature)}°</div>`;
+  return `<div class="weather tap" data-act="weather" role="button"><span class="wi">${WEATHER[w.s] ?? "🌡️"}</span>${Math.round(w.a.temperature)}°</div>`;
 }
 
 function card(d) {
+  if (d.kind === "camera") return camCard(d);
   const sm = summary(d), off = deviceOffline(d), active = !off && deviceActive(d);
   const tg = off ? [] : d.toggles;
   const btns = d.kind === "washer" && !off && window.washerCardButtons ? washerCardButtons(d)   // 一键约上/下筒 (washer_ui.js)
@@ -998,33 +1214,31 @@ function card(d) {
 
 function renderSmart() {
   const autos = S.model.automations || [];
-  const when = ts => {
-    if (!ts) return "还没执行过";
-    const t = new Date(ts), now = new Date();
-    const hm = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-    return "上次执行 " + (t.toDateString() === now.toDateString() ? hm : `${t.getMonth() + 1}月${t.getDate()}日 ${hm}`);
+  const miniFlow = desc => {
+    const clean = (desc || "").replace(/^草稿[｜|]\s*/, "").replace(/^如果\s*/, "");
+    const [trigger, ...actions] = clean.split(" → ");
+    const target = actions.join(" → ");
+    return `<div class="auto-mini-flow" title="${esc(clean)}"><span class="auto-mini-node source">${icon("smart")}</span><span class="auto-mini-copy">${esc(trigger || "等待条件")}</span>${target ? `<span class="auto-mini-arrow">→</span><span class="auto-mini-node target">${icon("power")}</span><span class="auto-mini-copy target-copy">${esc(target)}</span>` : ""}</div>`;
   };
+  const cards = autos.map(id => {
+    const s = st(id), on = s.s === "on", raw = S.model.automation_desc?.[id] || "";
+    const draft = raw.startsWith("草稿");
+    const name = S.model.automation_names?.[id] ?? id;
+    return `<div class="auto auto-row ${on ? "" : "off"}" data-act="auto-open" data-arg="${id}">
+      <div class="auto-row-main">
+        <div class="auto-row-title">${draft ? `<span class="draft">草稿</span>` : ""}<b>${esc(name)}</b></div>
+        ${miniFlow(raw)}
+      </div>
+      <button class="sw ${on ? "on" : ""}" style="--c:#14a38b" data-act="auto-toggle" data-arg="${id}" aria-label="${on ? "关闭" : "开启"}${esc(name)}"></button>
+    </div>`;
+  }).join("");
   $("#app").innerHTML = `
-    <div class="page">
-      <div class="top"><div class="top-row"><div class="home-name"><span>智能</span></div>
-        <button class="add-btn" data-act="auto-new" aria-label="新建自动化">${icon("plus")}</button></div>
-        <div class="smart-sub">自动化在家里的香橙派上运行，断网也照常执行</div>
-        ${autos.some(id => (S.model.automation_desc?.[id] || "").startsWith("草稿")) ? `<div class="smart-tip">「草稿」是照米家的自动化猜着写的，默认关着。确认没问题后打开它，同时去米家里关掉同名的那条，免得两边一起触发。</div>` : ""}</div>
-      <div class="autos">${autos.map(id => {
-        const s = st(id), on = s.s === "on";
-        // descriptions written as "草稿｜如果 … → …": the tag shows until the user confirms it
-        const raw = S.model.automation_desc?.[id] || "", draft = raw.startsWith("草稿"), desc = raw.replace(/^草稿[｜|]\s*/, "");
-        return `<div class="auto ${on ? "" : "off"}" data-act="auto-open" data-arg="${id}">
-          <div class="l"><div class="an">${draft ? `<span class="draft">草稿</span>` : ""}${esc(S.model.automation_names?.[id] ?? id)}</div>
-            ${desc ? `<div class="ad">${esc(desc)}</div>` : ""}
-            <div class="as">${dead(s.s) ? "不可用" : esc(when(s.a.last_triggered))}</div></div>
-          <button class="act" data-act="auto-run" data-arg="${id}">执行</button>
-          <button class="sw ${on ? "on" : ""}" style="--c:#14a38b" data-act="auto-toggle" data-arg="${id}"></button>
-        </div>`;
-      }).join("") || `<div class="empty">还没有自动化。<br>米家里的自动化迁移过来以后会显示在这里。</div>`}</div>
+    <div class="page smart-page">
+      <div class="top"><div class="top-row"><div class="home-name"><span>智能</span></div><button class="add-btn" data-act="auto-new" aria-label="新建自动化">${icon("plus")}</button></div><div class="smart-sub">自动化在家里的香橙派上运行，断网也照常执行</div></div>
+      ${autos.some(id => (S.model.automation_desc?.[id] || "").startsWith("草稿")) ? `<div class="smart-tip">草稿默认关闭；确认后再开启，并在米家关闭同名规则，避免重复触发。</div>` : ""}
+      <div class="autos auto-rows">${cards || `<div class="empty">还没有自动化。点右上角「+」创建第一条。</div>`}</div>
     </div>${bottomNav("smart")}`;
 }
-
 // ---------------------------------------------------------------- detail page
 
 // ---------------------------------------------------------------- air conditioner page (Mijia layout)
@@ -1074,14 +1288,13 @@ function renderDetail(d) {
       ${off ? "" : kindPanel(d)}
       ${tilesPanel(d)}
       ${d.features.length ? `<div class="panel"><h3>功能</h3>${d.features.map(f => entityRow(f)).join("")}</div>` : ""}
-      ${d.more.length ? `<details class="more" ${S.openMore ? "open" : ""}><summary>更多设置（${d.more.length}）</summary><div class="panel">${d.more.map(f => entityRow(f)).join("")}</div></details>` : ""}
     </div>`;
-  $("details.more")?.addEventListener("toggle", e => { S.openMore = e.target.open; });
 }
 
 function heroSub(d) {
   const r = d.roles;
   if ((d.kind === "ac" || d.kind === "heater") && st(r.main).a.current_temperature != null) return `室温 ${fmtNum(st(r.main).a.current_temperature)}°`;
+  if (d.kind === "water_heater" && st(r.main).a.current_temperature != null) return `水温 ${fmtNum(st(r.main).a.current_temperature)}°`;
   if (r.left && busyStatus(val(r.status))) return `还剩 ${minutes(r.left)}`;
   return "";
 }
@@ -1134,7 +1347,8 @@ function kindPanel(d) {
   }
   if (dom === "water_heater" && a.temperature != null) {
     return `<div class="panel"><div class="temp"><button class="circle" data-temp="${id}" data-d="-1">−</button>
-      <div class="v">${fmtNum(a.temperature)}<small>°C</small></div><button class="circle" data-temp="${id}" data-d="1">+</button></div></div>`;
+      <div class="v">${fmtNum(a.temperature)}<small>°C</small></div><button class="circle" data-temp="${id}" data-d="1">+</button></div>
+      ${window.whPanel ? whPanel(d) : ""}</div>`;
   }
   if (dom === "vacuum") {
     const go = (svc, text, on) => `<button class="chip ${on ? "on" : ""}" data-svc="${id}|${svc}">${text}</button>`;
@@ -1155,7 +1369,8 @@ function kindPanel(d) {
 function tilesPanel(d) {
   const r = d.roles;
   const keys = [["temperature", "温度"], ["humidity", "湿度"], ["illuminance", "光照"], ["power", "功率"], ["energy", "耗电量"], ["battery", "电量"]];
-  const tiles = keys.filter(([k]) => r[k]).map(([k, label]) => [label, r[k]]);
+  // the water heater's kWh is already counted on the 能耗 page
+  const tiles = keys.filter(([k]) => r[k] && !(k === "energy" && d.kind === "water_heater")).map(([k, label]) => [label, r[k]]);
   if (d.kind === "fridge") Object.entries(r).filter(([k]) => k.startsWith("zone:")).forEach(([k, id]) => tiles.push([k.slice(5), id]));
   if (r.left && num(r.left)) tiles.push(["剩余时间", r.left]);
   if (r.fault && !/无|No Faults|没有|null|^0$/.test(val(r.fault) || "")) tiles.push(["故障", r.fault]);
@@ -1198,10 +1413,14 @@ function entityRow(f) {
 // ---------------------------------------------------------------- routing & events
 
 const isSmart = () => location.hash === "#/smart";
+const isServer = () => location.hash === "#/server";
+const isLocal = () => location.hash === "#/local";
 
 function bottomNav(on) {
   return `<nav id="bnav"><button class="${on === "home" ? "on" : ""}" data-act="nav-home">${icon("home")}<span>家</span></button>
-    <button class="${on === "smart" ? "on" : ""}" data-act="nav-smart">${icon("smart")}<span>智能</span></button></nav>`;
+    <button class="${on === "smart" ? "on" : ""}" data-act="nav-smart">${icon("smart")}<span>智能</span></button>
+    <button class="${on === "nas" ? "on" : ""}" data-act="nav-nas">${icon("server")}<span>NAS</span></button>
+    <button class="${on === "local" ? "on" : ""}" data-act="nav-local">${icon("link")}<span>直连</span></button></nav>`;
 }
 
 function currentDevice() {
@@ -1220,8 +1439,22 @@ function render() {
   }
   const d = currentDevice();
   if (d && S.edit) S.edit = null;
-  d ? renderDetail(d) : isSmart() ? renderSmart() : renderHome();
+  const rects = !d && !isSmart() && !isServer() && !isLocal() && !isAuto() && $(".roomview.cur") ? new Map([...document.querySelectorAll(".roomview.cur .card[data-dev]")].map(c => [c.dataset.dev, c.getBoundingClientRect()])) : null, room0 = S.room, scrollY0 = window.scrollY;
+  d ? renderDetail(d) : isSmart() ? renderSmart() : isServer() ? renderServer() : isLocal() ? renderLocal() : renderHome();
+  if (!d && !isSmart() && !isServer() && !isLocal() && typeof loadEnergy === "function") loadEnergy();
   window.scrollTo(0, y);
+  if (rects && rects.size && room0 === S.room && window.scrollY === scrollY0) {
+    for (const c of document.querySelectorAll(".roomview.cur .card[data-dev]")) {
+      const a = rects.get(c.dataset.dev);
+      if (!a) continue;
+      const b = c.getBoundingClientRect(), dx = a.left - b.left, dy = a.top - b.top;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+      c.style.transition = "none"; c.style.transform = `translate(${dx}px, ${dy}px)`;
+      void c.offsetWidth;
+      c.style.transition = "transform .3s cubic-bezier(.2, .8, .25, 1)"; c.style.transform = "";
+      setTimeout(() => { c.style.transition = ""; }, 340);
+    }
+  }
   decorateEdit();
   const tabs = $(".tabs");
   if (tabs) { tabs.scrollLeft = tabsX; centerActiveTab(); placeIndicator(roomList().indexOf(S.room), false); }
@@ -1243,7 +1476,7 @@ window.addEventListener("scroll", markStuck, { passive: true });
 
 // Page transitions like Mijia: going deeper, the new page slides in from the right over the old one
 // (which drifts left); going back, the old page slides off to the right.
-const pageDepth = h => !h || h === "#/smart" ? 0 : /^#\/d\/[^/]+\/(m|more)\//.test(h) ? 2 : 1;
+const pageDepth = h => !h || h === "#/smart" || h === "#/server" || h === "#/local" ? 0 : /^#\/d\/[^/]+\/(m|more)\//.test(h) ? 2 : 1;
 let lastHash = location.hash;
 
 function pageGhost() {
@@ -1319,6 +1552,12 @@ document.addEventListener("click", e => {
   if (t.dataset.roomJump) { closeSheet(); selectRoom(t.dataset.roomJump); return; }
   const act = t.dataset.act;
   const arg = t.dataset.arg;
+  if (act === "cam-open") { camStop(); HomeHubApp.openCamera("c700", ""); return; }
+  if (act === "cam-play") { camInline(""); return; }
+  if (act === "cam-wake") { camWake(); return; }
+  if (act === "cam-clip") { camInline((arg || "").split("|")[1] || ""); return; }
+  if (act === "cam-clipfull") { closeSheet(); const c = (arg || "").split("|")[1]; if (c) HomeHubApp.openCamera("c700", c); return; }
+  if (act === "cam-all") { camAll(); return; }
   if (act === "edit-done" || act === "edit-cancel") return exitEdit();
   if (act === "edit-top") return editMoveToTop();
   if (act === "edit-move") return editMove();
@@ -1345,6 +1584,11 @@ document.addEventListener("click", e => {
     return comfortSend(arg, !comfortOf(arg)?.on);
   }
   if (act === "pub-edit") return publicAddressSheet();
+  if (act === "pub-test") {
+    if (!HomeHubApp.testPublicUrl) return toast("要先更新到新版 App 才能测试");
+    const el = $("#pubres"); if (el) { el.textContent = "正在测试…"; el.className = "pubres"; }
+    return HomeHubApp.testPublicUrl("t", $("#pubin")?.value || "");
+  }
   if (act === "pub-save" || act === "pub-reset") {
     const v = act === "pub-reset" ? "" : ($("#pubin")?.value || "");
     const err = HomeHubApp.setPublicUrl(v);
@@ -1356,8 +1600,10 @@ document.addEventListener("click", e => {
   if (act === "temps") return popSheet("temp");
   if (act === "lights-on") return allLights(true);
   if (act === "lights-off") return allLights(false);
-  if (act === "nav-home") { if (isSmart()) location.hash = ""; return; }
-  if (act === "nav-smart") { location.hash = "#/smart"; return; }
+  if (act === "nav-home") { if (isSmart() || isServer() || isLocal()) location.hash = ""; return; }
+  if (act === "nav-smart") { if (location.hash !== "#/smart") location.hash = "#/smart"; return; }
+  if (act === "nav-nas") { if (!isServer()) location.hash = "#/server"; return; }
+  if (act === "nav-local") { if (!isLocal()) location.hash = "#/local"; return; }
   if (act === "auto-toggle") {
     const on = isOn(arg);
     call(arg, on ? "turn_off" : "turn_on", {}, { s: on ? "off" : "on" });
@@ -1369,11 +1615,15 @@ document.addEventListener("click", e => {
   if (act === "auto-run") { call(arg, "trigger").then(() => toast("已执行")); return; }
   if (act === "back") { history.length > 1 ? history.back() : (location.hash = ""); return; }
   if (act === "washer") { location.href = "/washer"; return; }
+  if (act === "weather") return openWeather();
+  if (act === "energy") return openEnergy();
+  if (act === "monitor") { location.hash = "#/server"; return; }
   if (act === "update") { e.preventDefault(); HomeHubApp.checkUpdate(); return; }
   if (act === "switch-home") {
     const hs = S.model.homes.map(h => h.name), i = hs.indexOf(S.home);
     S.home = hs[(i + 1) % hs.length]; S.room = "全部"; render(); return;
   }
+  if (t.dataset.dev === CAM_ID) return;     // the camera card has its own buttons
   if (t.dataset.dev) { closeSheet(); location.hash = "#/d/" + encodeURIComponent(t.dataset.dev); }
 });
 
@@ -1409,8 +1659,13 @@ document.addEventListener("visibilitychange", () => {
 // The phone's back gesture / key (app 1.7+ asks the page first): close what's open, leave edit mode,
 // leave a sub-page; false means "nothing left to undo here" and the app goes to the background.
 window.hhBack = () => {
+  if (S.camInl) { camStop(); return true; }
+  if (window.hhCamClose) { window.hhCamClose(); return true; }
   if (drag.active) return true;
   if ($("#sheet")) { closeSheet(); return true; }
+  if ($("#wpage")) { closeWeather(); return true; }
+  if ($("#epage")) { closeEnergy(); return true; }
+  if ($("#kpage")) { closeKPage(); return true; }
   if (S.edit) { exitEdit(); return true; }
   if (isAuto()) { S.ed = null; location.hash = "#/smart"; return true; }
   if (/^#\/d\/[^/]+\//.test(location.hash)) { location.hash = location.hash.replace(/\/(m|more)\/.*$/, ""); return true; }
@@ -1465,7 +1720,7 @@ connect();
   document.addEventListener("touchstart", e => {
     on = false; pull = 0;
     if (busyRefresh || e.touches.length !== 1 || window.scrollY > 2 || S.edit || drag.active || S.pop || $("#sheet") || $("#kpage")) return;   // a finger that starts on a card counts too: moving cancels its long press
-    if (e.target.closest("input,[data-range],.wheel,.tabs")) return;
+    if (e.target.closest("input,[data-range],.wheel,.tabs,.kmode")) return;
     y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; on = null;       // null = not decided yet
   }, { passive: true });
   document.addEventListener("touchmove", e => {
@@ -1488,9 +1743,11 @@ connect();
     on = false;
     if (pull < LIMIT) return reset();
     busyRefresh = true; paint(56, "刷新中…", true);
+    S.camAt = 0;
     try {
       const fresh = Date.now() - lastFresh > 30000;      // rebuilding the device list takes a few seconds: not on every pull
       await Promise.race([load(fresh), new Promise((_, no) => setTimeout(() => no(new Error("连接超时")), 12000))]);
+      if (isLocal() && typeof loadLocal === "function") { await loadLocal(true); LC.at = Date.now(); paintLocal(); }   // 直连: ask every device again
       if (fresh) lastFresh = Date.now();
       toast("已刷新");
     } catch (e) { toast("刷新失败：" + e.message); }
@@ -1508,8 +1765,11 @@ connect();
   document.addEventListener("focusin", e => {
     const sh = e.target.closest?.("#sheet");
     if (!sh || !e.target.matches("input[type=text],input:not([type]),input[type=search],input[type=url],input[type=number],textarea")) return;
-    clearTimeout(t); sh.classList.add("kb");
+    clearTimeout(t);
+    if (!window.hhKeyboard) sh.classList.add("kb");             // an older app cannot tell the page how tall the keyboard is
     setTimeout(() => e.target.scrollIntoView?.({ block: "center" }), 60);
   });
   document.addEventListener("focusout", () => { clearTimeout(t); t = setTimeout(() => $("#sheet")?.classList.remove("kb"), 350); });
 })();
+
+setInterval(() => { if (!document.hidden && !S.camInl && document.querySelector(".camcard")) camLoad(true); }, 10000);

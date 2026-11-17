@@ -25,7 +25,7 @@ const domainOf = eid => eid.split(".")[0];
 // ---------------------------------------------------------------- HA config <-> editor model
 
 function parseAuto(cfg) {
-  const ed = { name: cfg.alias || "", triggers: [], actions: [], from: "", to: "", days: [], readonly: false, desc: cfg.description || "" };
+  const ed = { name: cfg.alias || "", triggers: [], conditions: [], actions: [], from: "", to: "", days: [], readonly: false, desc: cfg.description || "" };
   const ro = () => { ed.readonly = true; };
   for (const t of cfg.triggers || cfg.trigger || []) {
     const kind = t.trigger || t.platform, ids = [].concat(t.entity_id || []);
@@ -37,8 +37,11 @@ function parseAuto(cfg) {
     else ro();
   }
   for (const c of cfg.conditions || cfg.condition || []) {
-    if ((c.condition || "") !== "time") { ro(); continue; }
-    ed.from = (c.after || "").slice(0, 5); ed.to = (c.before || "").slice(0, 5); ed.days = [].concat(c.weekday || []);
+    const kind = c.condition || "", ids = [].concat(c.entity_id || []);
+    if (kind === "time") { ed.from = (c.after || "").slice(0, 5); ed.to = (c.before || "").slice(0, 5); ed.days = [].concat(c.weekday || []); }
+    else if (kind === "state" && ids.length === 1 && c.state != null) ed.conditions.push({ k: "state", entity: ids[0], to: c.state });
+    else if (kind === "numeric_state" && ids.length === 1) ed.conditions.push({ k: "num", entity: ids[0], above: c.above ?? null, below: c.below ?? null });
+    else ro();
   }
   for (const a of cfg.actions || cfg.action || []) {
     if (a.delay !== undefined) {
@@ -67,7 +70,12 @@ function buildAuto(ed) {
   if (ed.from) cond.after = ed.from + ":00";
   if (ed.to) cond.before = ed.to + ":00";
   if (ed.days.length && ed.days.length < 7) cond.weekday = ed.days;
-  const conditions = Object.keys(cond).length ? [{ condition: "time", ...cond }] : [];
+  const conditions = [
+    ...(Object.keys(cond).length ? [{ condition: "time", ...cond }] : []),
+    ...ed.conditions.map(c => c.k === "num"
+      ? { condition: "numeric_state", entity_id: c.entity, ...(c.above != null ? { above: c.above } : {}), ...(c.below != null ? { below: c.below } : {}) }
+      : { condition: "state", entity_id: c.entity, state: c.to })
+  ];
   const actions = ed.actions.map(a => a.k === "delay" ? { delay: { minutes: a.minutes } }
     : { action: `${domainOf(a.entity)}.${a.service}`, target: { entity_id: a.entity }, ...(Object.keys(a.data || {}).length ? { data: a.data } : {}) });
   return { alias: ed.name.trim(), description: describe(ed), triggers, conditions, actions };
@@ -88,6 +96,12 @@ function triggerText(t) {
   if (domainOf(t.entity) === "event") return entName(t.entity);
   return `${entName(t.entity)} ${stateWord(t.entity, t.to)}`;
 }
+function conditionText(c) {
+  if (c.k === "num") return `${entName(c.entity)} 当前${c.above != null ? "高于 " + c.above : "低于 " + c.below}${st(c.entity).a.unit_of_measurement || ""}`;
+  const word = stateWord(c.entity, c.to).replace(/^被/, "");
+  return `${entName(c.entity)} 当前${word}`;
+}
+function ruleIcon(x) { return icon(ownerOf(x.entity)?.kind || (domainOf(x.entity) === "binary_sensor" ? "presence" : "smart")); }
 const SVC_WORDS = { turn_on: "打开", turn_off: "关闭", toggle: "切换开关", press: "按下", trigger: "执行" };
 function actionText(a) {
   if (a.k === "delay") return `等 ${a.minutes} 分钟`;
@@ -103,7 +117,7 @@ function windowText(ed) {
 }
 function describe(ed) {
   const w = ed.from || ed.to || (ed.days.length && ed.days.length < 7) ? `（${windowText(ed)}）` : "";
-  return `如果 ${ed.triggers.map(triggerText).join(" 或 ")}${w} → ${ed.actions.map(actionText).join("，")}`;
+  return `如果 ${ed.triggers.map(triggerText).join(" 或 ")}${ed.conditions.length ? "，且" + ed.conditions.map(conditionText).join("、") : ""}${w} → ${ed.actions.map(actionText).join("，")}`;
 }
 
 // ---------------------------------------------------------------- what a device can trigger / do
@@ -136,6 +150,25 @@ function triggerChoices(d) {
   return [...first, ...events, ...enums, ...nums];
 }
 
+function conditionChoices(d) {
+  const out = [];
+  for (const id of deviceEntities(d)) {
+    const dom = domainOf(id), stt = st(id), name = d.labels?.[id] || "";
+    const pre = name && name !== d.name && name !== d.kind_name ? name + " " : "";
+    if (dom === "binary_sensor") {
+      const [yes, no] = BIN_WORDS[stt.a.device_class] || ["是", "否"];
+      out.push({ text: `${pre}当前${yes}`, t: { k: "state", entity: id, to: "on" } }, { text: `${pre}当前${no}`, t: { k: "state", entity: id, to: "off" } });
+    } else if (["switch", "light", "fan", "humidifier", "water_heater", "climate"].includes(dom)) {
+      out.push({ text: `${pre}当前已打开`, t: { k: "state", entity: id, to: "on" } }, { text: `${pre}当前已关闭`, t: { k: "state", entity: id, to: "off" } });
+    } else if (["sensor", "select"].includes(dom) && stt.a.options?.length) {
+      for (const o of stt.a.options) out.push({ text: `${pre}当前为 ${o}`, t: { k: "state", entity: id, to: o } });
+    } else if (dom === "sensor" && stt.a.unit_of_measurement && Number.isFinite(parseFloat(stt.s))) {
+      out.push({ text: `${pre}当前高于…`, t: { k: "num", entity: id, above: null }, ask: "above" }, { text: `${pre}当前低于…`, t: { k: "num", entity: id, below: null }, ask: "below" });
+    }
+  }
+  return out;
+}
+
 function actionChoices(d) {
   const out = [];
   for (const id of deviceEntities(d)) {
@@ -163,7 +196,7 @@ async function openAuto() {
   const target = autoTarget();
   if (S.ed?.target === target) return renderAutoEditor();
   if (target === "new") {
-    S.ed = { target, name: "", triggers: [], actions: [], from: "", to: "", days: [], readonly: false, desc: "" };
+    S.ed = { target, name: "", triggers: [], conditions: [], actions: [], from: "", to: "", days: [], readonly: false, desc: "" };
     return renderAutoEditor();
   }
   $("#app").innerHTML = `<div class="page"><div class="bar"><button class="back" data-act="ed-back">${icon("back")}</button><div class="t">自动化</div></div><div class="empty">读取中…</div></div>`;
@@ -178,22 +211,19 @@ async function openAuto() {
 
 function renderAutoEditor() {
   const ed = S.ed, isNew = ed.target === "new", s = isNew ? null : st(ed.target);
-  const rows = (items, kind) => items.map((x, i) => `<button class="ed-row" data-act="ed-row" data-arg="${kind}:${i}">
-      <span>${esc(kind === "t" ? triggerText(x) : actionText(x))}</span>${ed.readonly ? "" : `<span class="ed-x">${icon("trash")}</span>`}</button>`).join("");
+  const info = { t: ["触发条件", "当以下任一情况发生"], c: ["状态条件", "同时满足这些当前状态"], a: ["执行动作", "触发后按顺序执行"] };
+  const rows = (items, kind) => items.map((x, i) => `<button class="ed-rule" data-act="ed-row" data-arg="${kind}:${i}">
+      <span class="ed-rule-ico">${kind === "a" && x.k === "delay" ? icon("clock") : ruleIcon(x)}</span><span class="ed-rule-main"><small>${info[kind][0]}</small><b>${esc(kind === "t" ? triggerText(x) : kind === "c" ? conditionText(x) : actionText(x))}</b></span>${ed.readonly ? "" : `<span class="ed-x">${icon("trash")}</span>`}</button>`).join("");
+  const section = (kind, items) => `<div class="panel ed-section"><div class="ed-section-head"><span>${kind === "t" ? "①" : kind === "c" ? "②" : "③"}</span><div><h3>${info[kind][0]}</h3><small>${info[kind][1]}</small></div></div>${rows(items, kind) || `<p class="sheet-note ed-empty">${kind === "c" ? "不设则任何状态下都可触发" : "还没有" + info[kind][0]}</p>`}${ed.readonly ? "" : `<button class="ed-add" data-act="ed-add-${kind}">${icon("plus")}添加${info[kind][0]}</button>`}</div>`;
   $("#app").innerHTML = `
     <div class="page ed">
-      <div class="bar"><button class="back" data-act="ed-back">${icon("back")}</button>
-        <div class="t">${isNew ? "新建自动化" : "编辑自动化"}</div>
-        ${isNew ? "" : `<button class="sw ${s.s === "on" ? "on" : ""}" style="--c:#14a38b;margin-left:auto;margin-right:8px" data-act="auto-toggle" data-arg="${esc(ed.target)}"></button>`}</div>
+      <div class="bar"><button class="back" data-act="ed-back">${icon("back")}</button><div class="t">${isNew ? "新建自动化" : "编辑自动化"}</div>${isNew ? "" : `<button class="sw ${s.s === "on" ? "on" : ""}" style="--c:#14a38b;margin-left:auto;margin-right:8px" data-act="auto-toggle" data-arg="${esc(ed.target)}"></button>`}</div>
       ${ed.readonly ? `<div class="panel"><p class="sheet-note" style="text-align:left;margin:0">这条自动化用了编辑器还不支持的设置，只能查看。${esc(ed.desc)}</p></div>` : ""}
-      <div class="panel"><input id="ed-name" class="ed-name" maxlength="60" placeholder="给自动化起个名字" value="${esc(ed.name)}" ${ed.readonly ? "disabled" : ""}></div>
-      <div class="panel"><h3>如果（满足任一）</h3>${rows(ed.triggers, "t") || `<p class="sheet-note" style="text-align:left">还没有条件</p>`}
-        ${ed.readonly ? "" : `<button class="ed-add" data-act="ed-add-t">${icon("plus")}添加条件</button>`}</div>
-      <div class="panel"><h3>生效时间</h3><button class="ed-row" data-act="ed-window" ${ed.readonly ? "disabled" : ""}><span>${esc(windowText(ed))}</span></button></div>
-      <div class="panel"><h3>就执行（按顺序）</h3>${rows(ed.actions, "a") || `<p class="sheet-note" style="text-align:left">还没有动作</p>`}
-        ${ed.readonly ? "" : `<button class="ed-add" data-act="ed-add-a">${icon("plus")}添加动作</button>`}</div>
-      ${ed.readonly ? "" : `<div class="sheet-btns ed-btns">
-        ${isNew ? "" : `<button data-act="ed-delete">删除</button>`}<button class="pri" data-act="ed-save">保存</button></div>`}
+      <div class="panel ed-name-card"><input id="ed-name" class="ed-name" maxlength="60" placeholder="给自动化起个名字" value="${esc(ed.name)}" ${ed.readonly ? "disabled" : ""}></div>
+      ${section("t", ed.triggers)}${section("c", ed.conditions)}
+      <div class="panel ed-time-card"><span class="ed-rule-ico">${icon("clock")}</span><button class="ed-time-open" data-act="ed-window" ${ed.readonly ? "disabled" : ""}><small>④ 生效时间</small><b>${esc(windowText(ed))}</b></button><span class="chev">›</span></div>
+      ${section("a", ed.actions)}
+      ${ed.readonly ? "" : `<div class="sheet-btns ed-btns">${isNew ? "" : `<button data-act="ed-delete">删除</button>`}<button class="pri" data-act="ed-save">保存</button></div>`}
     </div>`;
   $("#ed-name")?.addEventListener("input", e => { ed.name = e.target.value; });
 }
@@ -201,20 +231,20 @@ function renderAutoEditor() {
 // ---- pickers (bottom sheets)
 
 function pickDevice(purpose) {
-  const choices = d => purpose === "t" ? triggerChoices(d) : actionChoices(d);
+  const choices = d => purpose === "a" ? actionChoices(d) : purpose === "c" ? conditionChoices(d) : triggerChoices(d);
   const devs = S.model.devices.filter(d => d.home === S.home && !deviceOffline(d) && choices(d).length);
-  const rooms = [...new Set(devs.map(d => d.room))];
-  const extra = purpose === "t" ? `<button data-act="ed-time">⏰ 定时（每天某个时间）</button>` : `<button data-act="ed-delay">⏳ 延时（等几分钟）</button>`;
-  sheet(`<h3>${purpose === "t" ? "添加条件" : "添加动作"}</h3><div class="sheet-list">${extra}
-    ${rooms.map(r => `<div class="sheet-group">${esc(r)}</div>` + devs.filter(d => d.room === r).map(d =>
-      `<button data-act="ed-dev" data-arg="${purpose}:${d.id}">${esc(d.name)}</button>`).join("")).join("")}</div>`);
+  const rooms = [...new Set(devs.map(d => d.room || "其他"))];
+  const extra = purpose === "t" ? `<button class="ed-special" data-act="ed-time">${icon("clock")}<span>定时触发<small>每天指定时间</small></span><b>›</b></button>` : purpose === "a" ? `<button class="ed-special" data-act="ed-delay">${icon("clock")}<span>延时执行<small>等待一段时间</small></span><b>›</b></button>` : "";
+  sheet(`<h3>${purpose === "t" ? "添加触发条件" : purpose === "c" ? "添加状态条件" : "添加执行动作"}</h3><div class="sheet-list"><div class="ed-specials">${extra}</div>
+    ${rooms.map(r => `<div class="sheet-group">${esc(r)}</div><div class="ed-devices">` + devs.filter(d => (d.room || "其他") === r).map(d =>
+      `<button class="ed-device" data-act="ed-dev" data-arg="${purpose}:${d.id}"><span class="ed-device-ico">${icon(d.kind || "switch")}</span><span>${esc(d.name)}</span></button>`).join("") + `</div>`).join("")}</div>`);
 }
 
 function pickChoice(purpose, devId) {
-  const d = S.byId[devId], list = purpose === "t" ? triggerChoices(d) : actionChoices(d);
+  const d = S.byId[devId], list = purpose === "a" ? actionChoices(d) : purpose === "c" ? conditionChoices(d) : triggerChoices(d);
   S.edChoices = list;
   sheet(`<h3>${esc(d.name)}</h3><div class="sheet-list">${list.map((c, i) =>
-    `<button data-act="ed-choice" data-arg="${purpose}:${i}">${esc(c.text)}</button>`).join("")}</div>`);
+    `<button class="ed-option" data-act="ed-choice" data-arg="${purpose}:${i}"><span class="ed-option-ico">${icon(d.kind || "smart")}</span><span>${esc(c.text)}</span><b>›</b></button>`).join("")}</div>`);
 }
 
 function choose(purpose, i) {
@@ -226,19 +256,21 @@ function choose(purpose, i) {
     $("#ed-num").focus();
     return;
   }
-  commit(purpose, structuredClone(purpose === "t" ? c.t : c.a));
+  commit(purpose, structuredClone(purpose === "a" ? c.a : c.t));
 }
 
 function chooseNumber(purpose, i) {
   const v = parseFloat($("#ed-num").value);
   if (!Number.isFinite(v)) return toast("填一个数字");
-  const c = S.edChoices[i], x = structuredClone(purpose === "t" ? c.t : c.a);
-  if (purpose === "t") x[c.ask] = v; else x.data = { [c.ask]: v };
+  const c = S.edChoices[i], x = structuredClone(purpose === "a" ? c.a : c.t);
+  if (purpose === "a") x.data = { [c.ask]: v }; else x[c.ask] = v;
   commit(purpose, x);
 }
 
 function commit(purpose, x) {
-  (purpose === "t" ? S.ed.triggers : S.ed.actions).push(x);
+  const list = purpose === "t" ? S.ed.triggers : purpose === "c" ? S.ed.conditions : S.ed.actions;
+  const replace = S.replaceRule;
+  if (replace?.kind === purpose) { list[replace.i] = x; S.replaceRule = null; } else list.push(x);
   closeSheet();
   renderAutoEditor();
 }
@@ -254,11 +286,11 @@ function delaySheet() {
 
 function windowSheet() {
   const ed = S.ed;
-  sheet(`<h3>生效时间</h3>
-    <div class="ed-win"><label>从 <input id="ed-from" type="time" value="${ed.from}"></label><label>到 <input id="ed-to" type="time" value="${ed.to}"></label></div>
-    <p class="sheet-note">都不填就是全天；「从」晚于「到」表示跨夜，比如 22:00 到 06:00。</p>
-    <div class="chips ed-days">${WEEK.map((w, i) => `<button class="chip ${!ed.days.length || ed.days.includes(w) ? "on" : ""}" style="--c:#14a38b" data-act="ed-day" data-arg="${w}">${WEEK_CN[i]}</button>`).join("")}</div>
-    <div class="sheet-btns"><button data-act="ed-window-all">全天每天</button><button class="pri" data-act="ed-window-ok">好</button></div>`);
+  sheet(`<h3 class="ed-window-title">${icon("clock")}生效时间</h3><p class="sheet-note">选择什么时候这条自动化才会生效</p>
+    <div class="ed-time-presets"><button data-act="ed-window-all">全天</button><button data-act="ed-window-preset" data-arg="day">白天</button><button data-act="ed-window-preset" data-arg="night">夜晚</button></div>
+    <div class="ed-win"><label><small>开始</small><input id="ed-from" type="time" value="${ed.from}"></label><span>至</span><label><small>结束</small><input id="ed-to" type="time" value="${ed.to}"></label></div>
+    <div class="ed-week-label">重复</div><div class="chips ed-days">${WEEK.map((w, i) => `<button class="chip ${!ed.days.length || ed.days.includes(w) ? "on" : ""}" style="--c:#14a38b" data-act="ed-day" data-arg="${w}">${WEEK_CN[i]}</button>`).join("")}</div>
+    <div class="sheet-btns"><button data-act="sheet-close">取消</button><button class="pri" data-act="ed-window-ok">完成</button></div>`);
 }
 
 function windowOk() {
@@ -270,10 +302,9 @@ function windowOk() {
 
 function rowSheet(arg) {
   if (S.ed.readonly) return;
-  const [kind, i] = arg.split(":"), list = kind === "t" ? S.ed.triggers : S.ed.actions;
-  sheet(`<h3>${esc(kind === "t" ? triggerText(list[i]) : actionText(list[i]))}</h3>
-    <div class="sheet-btns">${kind === "a" && i > 0 ? `<button data-act="ed-up" data-arg="${i}">往前移</button>` : ""}
-      <button class="pri danger" data-act="ed-remove" data-arg="${arg}">删掉这一条</button></div>`);
+  const [kind, i] = arg.split(":"), list = kind === "t" ? S.ed.triggers : kind === "c" ? S.ed.conditions : S.ed.actions;
+  const text = kind === "t" ? triggerText(list[i]) : kind === "c" ? conditionText(list[i]) : actionText(list[i]);
+  sheet(`<h3>${esc(text)}</h3><div class="sheet-btns"><button data-act="ed-change" data-arg="${arg}">修改</button>${kind === "a" && i > 0 ? `<button data-act="ed-up" data-arg="${i}">往前移</button>` : ""}<button class="pri danger" data-act="ed-remove" data-arg="${arg}">删除</button></div>`);
 }
 
 async function saveAuto() {
@@ -312,6 +343,7 @@ document.addEventListener("click", e => {
   if (act === "ed-back") { S.ed = null; location.hash = "#/smart"; }
   else if (act === "ed-add-t") pickDevice("t");
   else if (act === "ed-add-a") pickDevice("a");
+  else if (act === "ed-add-c") pickDevice("c");
   else if (act === "ed-dev") { const [p, id] = arg.split(":"); pickChoice(p, id); }
   else if (act === "ed-choice") { const [p, i] = arg.split(":"); choose(p, +i); }
   else if (act === "ed-num-ok") { const [p, i] = arg.split(":"); chooseNumber(p, +i); }
@@ -322,9 +354,11 @@ document.addEventListener("click", e => {
   else if (act === "ed-window") windowSheet();
   else if (act === "ed-day") t.classList.toggle("on");
   else if (act === "ed-window-all") { Object.assign(S.ed, { from: "", to: "", days: [] }); closeSheet(); renderAutoEditor(); }
+  else if (act === "ed-window-preset") { const v = arg === "night" ? { from: "22:00", to: "06:00" } : { from: "07:00", to: "22:00" }; Object.assign(S.ed, v, { days: [] }); closeSheet(); renderAutoEditor(); }
   else if (act === "ed-window-ok") windowOk();
   else if (act === "ed-row") rowSheet(arg);
-  else if (act === "ed-remove") { const [k, i] = arg.split(":"); (k === "t" ? S.ed.triggers : S.ed.actions).splice(+i, 1); closeSheet(); renderAutoEditor(); }
+  else if (act === "ed-change") { const [kind, i] = arg.split(":"); S.replaceRule = { kind, i: +i }; closeSheet(); pickDevice(kind); }
+  else if (act === "ed-remove") { const [k, i] = arg.split(":"); (k === "t" ? S.ed.triggers : k === "c" ? S.ed.conditions : S.ed.actions).splice(+i, 1); closeSheet(); renderAutoEditor(); }
   else if (act === "ed-up") { const i = +arg, a = S.ed.actions; [a[i - 1], a[i]] = [a[i], a[i - 1]]; closeSheet(); renderAutoEditor(); }
   else if (act === "ed-save") saveAuto();
   else if (act === "ed-delete") deleteAuto();

@@ -73,7 +73,7 @@
   </div>
 
   <div class="card">
-    <label class="row"><span>几点前洗完</span><input type="time" id="finish" value="05:50"></label>
+    <label class="row"><span>几点前洗完</span><input type="time" id="finish" value="06:00"></label>
     <div class="row checks" style="padding:8px 0">
       <label><input type="checkbox" id="c-upper" checked>上桶</label>
       <label><input type="checkbox" id="c-lower" checked>下桶</label>
@@ -96,6 +96,7 @@
   <p class="muted" id="app"></p>
 </main>
 <script>
+window.hhBack = () => { location.href = "/"; return true; };
 if (window.HomeHubApp?.insetTop) { document.documentElement.style.setProperty("--sat", HomeHubApp.insetTop() + "px"); document.documentElement.style.setProperty("--sab", HomeHubApp.insetBottom() + "px"); }
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));

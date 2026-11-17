@@ -8,6 +8,7 @@ pull the finish target earlier by the worst recent overrun.
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
@@ -18,6 +19,10 @@ DRUMS = {
     "upper": {"name": "上桶", "siid": 12},
     "lower": {"name": "下桶", "siid": 13},
 }
+
+
+DRY_TIMES = (30, 60, 90, 120, 180)      # minutes of timed drying the washer accepts (150 and everything else is refused)
+DRY_ONLY_TIMES = tuple(range(20, 190, 10))   # with 单烘干 on it takes 20-180 in steps of 10 (tested on the upper drum 2026-11-12, as Mijia offers)
 
 
 def entity(kind: str, key: str, drum: str) -> str:
@@ -73,7 +78,7 @@ PROGRAM_FIELDS = {
                      ["智能烘干", "定时烘干", "不烘干"]),
     "drying_degree": ("烘干程度", "select", {"upper": "drying_degree_p_12_29", "lower": "drying_degree_p_13_29"},
                       ["Store", "Wear Immediately", "Ironing"]),
-    "drying_time": ("定时烘干(分钟)", "number", {"upper": "drying_time_p_12_8", "lower": "drying_time_p_13_8"}, [0, 90]),   # the app offers 20-90 in steps of 10
+    "drying_time": ("定时烘干(分钟)", "number", {"upper": "drying_time_p_12_8", "lower": "drying_time_p_13_8"}, [0, 180]),   # the machine takes only DRY_TIMES (tested on the real washer; 20, 40, 50 ... are refused with -4404)
     "sleep_mode": ("夜间模式", "switch", {"upper": "sleep_mode_p_12_23", "lower": "sleep_mode_p_13_23"}, None),
 }
 DRYING_DEGREE_LABELS = {"Store": "收纳干", "Wear Immediately": "穿着即可", "Ironing": "熨烫干", "Close": "关"}
@@ -94,6 +99,19 @@ DEFAULT_PROGRAMS = {
 # less than its usual length has lost its drying step.
 SUSPICIOUS_SHORT_RATIO = 0.6
 DRY_ONLY_SLACK_MIN = 15   # weighing etc. on top of the drying time
+
+
+# 快速 has three sub-modes in Mijia (极快 12 / 超快 20 / 快速 30 min), kept in the washer's "快速洗档位" select.
+QUICK_MODE = "快速"
+QUICK_LEVELS = {"Level1": ("极快", 12), "Level2": ("超快", 20), "Level3": ("快速", 30)}
+QUICK_DEFAULT = {"quick_level": "Level2", "temp": "常温", "rinse": 1, "spin": "800", "drying_level": "不烘干", "shake": 0}
+_QUICK_PIID = {"upper": (33, 24), "lower": (31, 24)}      # (quick_wash_level, shake_time) property ids
+
+
+def quick_entities(drum: str) -> dict[str, str]:
+    lvl, shake = _QUICK_PIID[drum]
+    siid = DRUMS[drum]["siid"]
+    return {"level": f"select.{PREFIX}_quick_wash_level_p_{siid}_{lvl}", "shake": f"number.{PREFIX}_shake_time_p_{siid}_{shake}"}
 
 
 def program_entities(drum: str) -> dict[str, tuple[str, str]]:
@@ -117,9 +135,15 @@ def normalize_program(drum: str, prog: dict) -> dict:
             v = int(v)
             if not choices[0] <= v <= choices[1]:
                 raise ValueError(f"{PROGRAM_FIELDS[k][0]} 要在 {choices[0]}–{choices[1]} 之间")
+            if k == "drying_time" and v:
+                v = min(DRY_ONLY_TIMES if prog.get("dry_only") else DRY_TIMES, key=lambda t: abs(t - v))   # the nearest the machine accepts
         else:
             v = bool(v)
         out[k] = v
+    if prog.get("quick_level") in QUICK_LEVELS:
+        out["quick_level"] = prog["quick_level"]
+    if "shake" in prog:
+        out["shake"] = max(0, min(1440, int(prog["shake"])))
     if prog.get("estimate_min"):
         out["estimate_min"] = int(prog["estimate_min"])
     return out
@@ -184,7 +208,7 @@ DONE = "洗涤完成"
 OFF = "已关机"
 
 CUSTOM_MODE = "自定义"
-DEFAULT_FINISH_BY = time(5, 50)
+DEFAULT_FINISH_BY = time(6, 0)
 VALLEY_START = time(22, 0)
 
 DEFAULT_BUFFER_MIN = 20     # until we have enough measured runs
@@ -285,6 +309,69 @@ def buffer_minutes(runs: list[Run], mode: str = CUSTOM_MODE) -> tuple[int, str]:
     worst = max(r.overrun_min for r in recent)
     b = int(min(MAX_BUFFER_MIN, max(MIN_BUFFER_MIN, math.ceil(worst) + 5)))
     return b, f"最近 {len(recent)} 次最多比预估多用 {worst:.0f} 分钟，留 {b} 分钟余量"
+
+
+# ---- learning when a booking really ends --------------------------------------------------------
+# The washer starts at (finish it was told) - (its own estimate) and then takes as long as it takes: the upper drum's
+# smart drying runs ~90 min longer than the estimate, the lower one ~80 min shorter, and the drying alone varies by
+# +-10 min from night to night. So every reservation we made is compared with when its run really ended; the typical
+# difference ("bias") is what the next reservation is shifted by, and it moves with the last runs.
+CALIB_KEEP = 7           # latest runs that count
+CALIB_MIN = 3            # fewer than this: fall back to the worst-overrun buffer
+CALIB_OUTLIER_MIN = 30   # a run this far from the typical one (door opened, power cut ...) is ignored
+CALIB_ESTIMATE_TOL = 12  # same program = the washer's estimate for it within this many minutes
+AIM_EARLY_MAX = 8        # aim a little before the target (late costs peak-rate electricity), at most this much
+
+
+def _wf_at(detail: dict, ts: datetime) -> datetime | None:
+    plan = detail.get("plan") or {}
+    if plan.get("washer_finish_at"):
+        return datetime.fromisoformat(plan["washer_finish_at"])
+    hm = plan.get("washer_finish")
+    if not hm or plan.get("reservation_min") is None:
+        return None
+    h, m = hm.split(":")
+    t = ts.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+    return t if t >= ts - timedelta(minutes=30) else t + timedelta(days=1)
+
+
+def booking_biases(bookings: list[dict], runs: list[Run], drum: str, mode: str, estimate: float | None) -> list[tuple[datetime, float]]:
+    """(when booked, minutes the run really ended after the finish time we told the washer) for every finished reservation
+    of this drum, mode and program (told apart by the washer's estimate for it)."""
+    out = []
+    for b in bookings:
+        d = b["detail"]
+        if b["dry_run"] or not b["ok"] or b["drum"] != drum or d.get("mode", CUSTOM_MODE) != mode:
+            continue
+        plan = d.get("plan") or {}
+        if estimate and abs((plan.get("estimate_min") or 0) - estimate) > CALIB_ESTIMATE_TOL:
+            continue
+        ts = datetime.fromisoformat(b["ts"])
+        wf = _wf_at(d, ts)
+        if wf is None:
+            continue
+        run = next((r for r in runs if r.start >= ts - timedelta(minutes=5)), None)
+        if run is None or run.end is None or not run.completed or run.start > ts + timedelta(hours=26):
+            continue
+        out.append((ts, (run.end - wf).total_seconds() / 60))
+    return sorted(out)
+
+
+def calibrated_buffer(samples: list[tuple[datetime, float]], early: bool = True) -> tuple[int, str] | None:
+    """Minutes to pull the finish time the washer is told by (negative: push it later), from the latest runs."""
+    biases = [b for _, b in samples[-(CALIB_KEEP + 2):]]
+    if len(biases) < CALIB_MIN:
+        return None
+    med = statistics.median(biases)
+    kept = [b for b in biases if abs(b - med) <= CALIB_OUTLIER_MIN][-CALIB_KEEP:]
+    if len(kept) < CALIB_MIN:
+        return None
+    bias = statistics.median(kept)
+    spread = statistics.pstdev(kept)
+    margin = min(AIM_EARLY_MAX, round(spread / 2)) if early else 0
+    note = (f"最近 {len(kept)} 次实测：洗衣机实际比它自己报的{'晚' if bias >= 0 else '早'}结束 {abs(bias):.0f} 分钟（每晚波动约 ±{spread:.0f}），"
+            f"按这个倒推{f'，再提前 {margin} 分钟' if margin else ''}")
+    return round(bias + margin), note
 
 
 def next_occurrence(now: datetime, t: time) -> datetime:

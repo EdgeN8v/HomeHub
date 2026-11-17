@@ -37,7 +37,8 @@ DROP_ATTRS = {"friendly_name", "icon", "entity_picture", "supported_features", "
 
 
 def slim(st: dict) -> dict:
-    return {"s": st["state"], "a": {k: v for k, v in st.get("attributes", {}).items() if k not in DROP_ATTRS}}
+    return {"s": st["state"], "t": st.get("last_changed"),
+            "a": {k: v for k, v in st.get("attributes", {}).items() if k not in DROP_ATTRS}}
 
 
 
@@ -193,8 +194,14 @@ class Home:
             elif kind != "time":
                 raise web.HTTPBadRequest(text=f"不支持的条件 {kind}")
         for c in conditions:
-            if c.get("condition") != "time":
-                raise web.HTTPBadRequest(text="只支持生效时间段")
+            kind = c.get("condition")
+            if kind == "time":
+                continue
+            if kind in ("state", "numeric_state"):
+                if not ent_ok(c.get("entity_id")):
+                    raise web.HTTPBadRequest(text="状态条件里有不认识的设备")
+                continue
+            raise web.HTTPBadRequest(text=f"不支持的状态条件 {kind}")
         for a in actions:
             if "delay" in a:
                 continue

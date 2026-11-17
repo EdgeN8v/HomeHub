@@ -1,13 +1,14 @@
-﻿# 发布手机 App 的新版本：编译 release 包，连同 version.json 传到香橙派 ~/homehub/hub/data/updates/。
+﻿# 发布手机 App 的新版本：编译 release 包，连同 version.json 传到香橙派 SD 卡的 /mnt/nas-sd/homehub/data/updates/。
 # 手机上的 App 打开时会检查到新版本，点"更新"即可，在外面走公网也行。
 # 发布前：改 android\app\build.gradle.kts 的 versionCode（+1）和 versionName，在 CHANGELOG.md 顶部写这一版的说明。
 param(
-    [string]$Pi = "CUI@192.168.31.61",
-    [string]$PiDir = "/home/CUI/homehub/hub/data/updates",
+    [string]$Pi = "",
+    [string]$PiDir = "/mnt/nas-sd/homehub/data/updates",
     [switch]$NoBuild
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+if (-not $Pi) { $Pi = "$((& python "$root\tools\mget.py" pi ssh_user).Trim())@$((& python "$root\tools\mget.py" pi address).Trim())" }
 $ssh = @("-o", "BatchMode=yes")
 
 if (-not $NoBuild) {
