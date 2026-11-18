@@ -137,6 +137,17 @@ async def overview(request: web.Request):
                               "ignored": j.get("ignored", []), "jobs": j.jobs(), "collector": j.get("collector", {})})
 
 
+async def revision(request: web.Request):
+    """A few bytes that change whenever the overview would: the page asks this every 20 s and only downloads the
+    (megabytes of) overview when it moved."""
+    j = _j(request)
+    q = lambda sql: j.db.execute(sql).fetchone()
+    parts = [q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM chunks"), q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM ideas"),
+             q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM jobs")]
+    extra = [len(json.dumps(j.get("repos", {}), sort_keys=True)), len(json.dumps(j.get("ignored", []))), (j.get("collector", {}) or {}).get("state")]
+    return web.json_response({"rev": "|".join(str(x) for r in parts for x in r) + "|" + "|".join(str(x) for x in extra)})
+
+
 async def post_chunks(request: web.Request):
     b = await request.json()
     return web.json_response({"saved": _j(request).upsert_chunks(b.get("chunks", []))})
@@ -258,6 +269,7 @@ def setup(app: web.Application, data: Path):
         web.get("/idea-dl/{slug}/Idea.apk", app_download),
         web.post("/api/journey/ideas/{id}/delete", delete_idea_post),
         web.get("/api/journey", overview),
+        web.get("/api/journey/rev", revision),
         web.get("/api/journey/chunk-index", chunk_index),
         web.post("/api/journey/chunks", post_chunks),
         web.post("/api/journey/repos", post_repos),

@@ -677,6 +677,18 @@ def why_block(repo: Path) -> str:
     return "\n".join(lines)
 
 
+NL = chr(10)
+
+
+def tidy_message(msg: str) -> str:
+    """The small model sometimes wraps the message in a code fence or adds a note about its own sources: keep only the message."""
+    lines = [ln for ln in str(msg).strip().splitlines() if not ln.strip().startswith("```")]
+    paras = [q for q in NL.join(lines).strip().split(NL + NL) if q.strip()]
+    while len(paras) > 1 and paras[-1].lstrip().startswith(("注意", "说明：", "备注")):
+        paras.pop()
+    return (NL + NL).join(paras).strip()
+
+
 def commit_message(repo: Path, first: bool = False) -> str:
     stat = git(repo, "diff", "--cached", "--stat").stdout[-3000:]
     diff = git(repo, "diff", "--cached", "--unified=1").stdout[:20000]
@@ -689,7 +701,7 @@ def commit_message(repo: Path, first: bool = False) -> str:
     if why:
         ask += "【开发记录（Idea 里这个项目最近的节点）】\n" + why + "\n\n"
     try:
-        msg = ask_claude(ask + stat + "\n\n" + diff, None, timeout=300, model=SIMPLE_MODEL).strip()
+        msg = tidy_message(ask_claude(ask + stat + "\n\n" + diff, None, timeout=300, model=SIMPLE_MODEL))
         if msg:
             return msg
     except Exception as e:

@@ -27,12 +27,19 @@ async function api(path, body) {
 const day = ts => ts ? new Date(ts).toLocaleDateString("zh-CN", { year: "numeric", month: "numeric", day: "numeric" }) : "";
 const ago = sec => { const m = Math.round((Date.now() / 1000 - sec) / 60); return m < 1 ? "刚刚" : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`; };
 
-async function load() {
+async function load(force = true) {
   try {
+    const wasOffline = S.offline;
+    const rev = await api("/api/journey/rev").then(r => r.rev, () => null);   // a few bytes; the overview itself is megabytes
+    if (!force && S.data && rev && rev === S.rev && !S.offline) return;
     const d = await api("/api/journey");
-    S.data = d; S.model = null;
-    store("idea.cache", JSON.stringify(d));
+    const text = JSON.stringify(d);
+    S.rev = rev;
+    store("idea.cache", text);
+    const same = text === S.text; S.text = text;
     S.offline = false;
+    if (same && S.data && !wasOffline) return;                       // nothing new: keep the page as it is (a re-render drops taps in flight)
+    S.data = d; S.model = null;
   } catch (e) {
     if (!S.data) { const c = stored("idea.cache"); if (c) S.data = JSON.parse(c); }
     S.offline = true;
@@ -147,7 +154,12 @@ function tries(n) { return n.attempts.map(a => a.ok ? "✅" : "❌").join(""); }
 function viewProjects() {
   const M = model();
   if (!M.projects.length) return `<div class="card empty">还没有内容。电脑上的收集器正在把你和 Claude / Codex 的历史对话整理成节点，每段大约 1 分钟，整理好一段就会出现一段。</div>`;
-  return M.projects.map(p => {
+  const recent = [...M.nodes].sort((a, b) => (b.end_ts || b.start_ts || "").localeCompare(a.end_ts || a.start_ts || "")).slice(0, 8);
+  const latest = `<div class="sub" style="margin:4px 2px 8px">最近的节点（刚做完的事，从新到旧）</div>` + recent.map(n => `<div class="card node" data-go="#/n/${encodeURIComponent(n.id)}">
+      <div class="row"><b class="grow">${KIND_ICON[n.kind] || "📌"} ${esc(n.title)}</b>${statusBadge(n.status)}</div>
+      <div class="muted">${esc(n.project)} · ${esc(day(n.end_ts || n.start_ts))} · 试了 ${n.attempts.length} 次 ${tries(n)}</div></div>`).join("")
+    + `<div class="sub" style="margin:14px 2px 8px">所有项目</div>`;
+  return latest + M.projects.map(p => {
     const solved = p.nodes.filter(n => n.status === "解决").length, open = p.nodes.filter(n => n.status !== "解决").length;
     const tech = techCount(p.nodes).slice(0, 6).map(t => `<span class="tag">${esc(t.name)}</span>`).join("");
     const lastN = p.nodes.at(-1);
@@ -164,11 +176,13 @@ function viewProject(name) {
   if (!p) return back("项目", "#/") + `<div class="card empty">没有这个项目</div>`;
   const tech = techCount(p.nodes).slice(0, 16).map(t => `<span class="tag">${esc(t.name)} ${t.n}</span>`).join("");
   const solved = p.nodes.filter(n => n.status === "解决").length;
-  const list = p.nodes.map((n, i) => `<div class="step"><div class="dotnum ${STATUS_CLS[n.status] || "wip"}">${i + 1}</div>
+  const LIM = S.showAll === name ? Infinity : 40, hidden = Math.max(0, p.nodes.length - LIM);
+  const list = p.nodes.map((n, i) => ({ n, i })).filter(({ i }) => i >= hidden).reverse().map(({ n, i }) => `<div class="step"><div class="dotnum ${STATUS_CLS[n.status] || "wip"}">${i + 1}</div>
       <div class="card node" data-go="#/n/${encodeURIComponent(n.id)}">
         <div class="row"><b class="grow">${KIND_ICON[n.kind] || "📌"} ${esc(n.title)}</b>${statusBadge(n.status)}</div>
         <div class="muted">${esc(day(n.start_ts))} · 试了 ${n.attempts.length} 次 ${tries(n)}</div>
-        <div class="trig">${esc(n.trigger)}</div></div></div>`).join("");
+        <div class="trig">${esc(n.trigger)}</div></div></div>`).join("")
+    + (hidden ? `<div class="card empty" data-act="all" data-name="${esc(name)}">还有更早的 ${hidden} 个节点，点这里全部展开 ›</div>` : "");
   return back("全部项目", "#/") + `<div class="card"><div class="ptitle">${esc(p.name)}</div>
       <div class="muted">${esc(day(p.first))} 开始 · ${p.nodes.length} 个节点 · 解决 ${solved} · 失败尝试 ${p.nodes.reduce((s, n) => s + fails(n), 0)}</div>
       <div style="margin-top:6px">${tech}</div></div>
@@ -312,6 +326,7 @@ document.addEventListener("click", async e => {
   if (d.tech !== undefined) { S.tech = d.tech; render(); window.scrollTo(0, 0); return; }
   if (d.files) { S.repoOpen.has(d.files) ? S.repoOpen.delete(d.files) : S.repoOpen.add(d.files); render(); return; }
   if (d.act === "reload") { load(); return; }
+  if (d.act === "all") { S.showAll = d.name; render(); return; }
   if (d.act === "update") { e.preventDefault(); APP?.checkUpdate(); return; }
   try {
     if (d.keep) {
@@ -389,4 +404,6 @@ document.addEventListener("input", e => {
 }
 { const c = stored("idea.cache"); if (c) { try { S.data = JSON.parse(c); render(); } catch { } } }   // show the last copy at once
 load();
-setInterval(() => { if (!document.hidden && !document.activeElement?.matches("input,textarea,select")) load(); }, 20000);
+let lastTouch = 0;
+document.addEventListener("touchstart", () => { lastTouch = Date.now(); }, { passive: true });
+setInterval(() => { if (!document.hidden && Date.now() - lastTouch > 8000 && !document.activeElement?.matches("input,textarea,select")) load(false); }, 20000);
