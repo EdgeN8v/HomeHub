@@ -206,6 +206,8 @@ class Home:
             if "delay" in a:
                 continue
             domain, _, service = str(a.get("action", "")).partition(".")
+            if (domain, service) == ("automation", "turn_off") and (a.get("target") or {}).get("entity_id") == "{{ this.entity_id }}":
+                continue      # 执行一次: an automation may switch itself off after it ran
             if service not in ALLOWED.get(domain, ()) or domain == "automation":
                 raise web.HTTPBadRequest(text=f"不支持的动作 {a.get('action')}")
             if not ent_ok((a.get("target") or {}).get("entity_id")):

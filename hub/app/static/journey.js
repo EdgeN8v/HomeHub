@@ -251,22 +251,30 @@ function viewRepos() {
   for (const j of S.data.jobs || []) if (!jobs.has(j.repo)) jobs.set(j.repo, j);
   const sorted = [...repos].sort((a, b) => (ign.has(a.name) - ign.has(b.name)) || repoState(a).rank - repoState(b).rank || a.name.localeCompare(b.name));
   const scanned = (S.data.repos || {}).scanned;
-  return `<div class="note">上次扫描 ${esc(scanned ? new Date(scanned).toLocaleString("zh-CN") : "—")}。推送由家里电脑执行，提交信息由 Claude 按改动自动写。</div>` +
+  return `<div class="note">上次扫描 ${esc(scanned ? new Date(scanned).toLocaleString("zh-CN") : "—")}。推送由家里电脑执行，提交信息由 Claude 按改动和你在 Idea 里的开发记录自动写（含“为什么”）。</div>` +
     sorted.map(r => {
       const st = repoState(r), job = jobs.get(r.name), open = S.repoOpen.has(r.name), ignored = ign.has(r.name);
       const canPush = r.git && r.remote && r.mine !== false && (r.dirty || r.unpushed);
-      const jobLine = job ? `<div class="muted" style="margin-top:6px">${{ queued: "⏳ 等电脑接单…", running: "⏳ 正在提交并推送…", done: "✅ 已推送", failed: "❌ 推送失败" }[job.status] || esc(job.status)}
-          ${job.status === "done" && job.result?.commit ? " · " + esc(job.result.commit) : ""} · ${esc(ago(job.updated))}
+      const top = !/[\\/]/.test(r.name);                                  // only top-level project folders get a repo of their own
+      const canCreate = top && r.mine !== false && !r.remote && !ign.has(r.name);
+      const canVis = r.git && r.remote && r.mine !== false && r.visibility;
+      const busy = job && ["queued", "running"].includes(job.status);
+      const word = { push: "推送", create_private: "建私有库", create_public: "建公开库", make_private: "改成私有", make_public: "改成公开" }[job?.kind] || "任务";
+      const jobLine = job ? `<div class="muted" style="margin-top:6px">${{ queued: "⏳ 等电脑接单…", running: `⏳ 正在${word}…`, done: `✅ ${word}完成`, failed: `❌ ${word}失败` }[job.status] || esc(job.status)}
+          ${job.status === "done" && (job.result?.commit || job.result?.repo) ? " · " + esc(job.result.commit || job.result.repo) : ""} · ${esc(ago(job.updated))}
           ${job.status === "failed" ? `<div class="warn">${esc(job.result?.error)}${job.result?.files ? "：" + esc(job.result.files.join("、")) : ""}${job.result?.detail ? `<div class="files">${esc(job.result.detail)}</div>` : ""}</div>` : ""}</div>` : "";
       return `<div class="card repo" style="${ignored ? "opacity:.55" : ""}">
-        <div class="row"><div class="grow"><b>${esc(r.name)}</b>${r.branch ? ` <span class="muted">${esc(r.branch)}</span>` : ""}
+        <div class="row"><div class="grow"><b>${esc(r.name)}</b>${r.branch ? ` <span class="muted">${esc(r.branch)}</span>` : ""}${r.visibility ? ` <span class="muted">${r.visibility === "public" ? "🌐 公开" : "🔒 私有"}</span>` : ""}
           <div class="st ${st.cls}">${esc(st.text)}</div>
           <div class="muted">${r.last_commit ? "上次提交 " + esc(day(r.last_commit)) + "：" + esc(r.last_msg) : r.changed ? "最近改动 " + esc(day(r.changed * 1000)) : ""}</div></div>
-          ${canPush ? `<button class="btn" data-push="${esc(r.name)}" ${job && ["queued", "running"].includes(job.status) ? "disabled" : ""}>一键推送</button>` : ""}</div>
+          ${canPush ? `<button class="btn" data-push="${esc(r.name)}" ${busy ? "disabled" : ""}>一键推送</button>` : ""}</div>
+        ${canCreate ? `<div class="row" style="margin-top:8px"><button class="btn small" data-job="create_private" data-repo="${esc(r.name)}" ${busy ? "disabled" : ""}>🔒 建私有库并上传</button>
+          <button class="btn small ghost" data-job="create_public" data-repo="${esc(r.name)}" ${busy ? "disabled" : ""}>🌐 建公开库并上传</button></div>` : ""}
         ${r.secrets?.length ? `<div class="warn">⚠️ 改动里有像密码/密钥的文件，推送会被拦下：${esc(r.secrets.join("、"))}（加进 .gitignore）</div>` : ""}
         ${jobLine}
         <div class="row" style="margin-top:8px">
           ${r.files?.length ? `<button class="btn small ghost" data-files="${esc(r.name)}">${open ? "收起" : `看改了哪些文件 (${r.files.length})`}</button>` : ""}
+          ${canVis ? `<button class="btn small ghost" data-job="${r.visibility === "public" ? "make_private" : "make_public"}" data-repo="${esc(r.name)}" ${busy ? "disabled" : ""}>${r.visibility === "public" ? "🔒 改成私有" : "🌐 改成公开"}</button>` : ""}
           <button class="btn small ghost" data-ignore="${esc(r.name)}" data-on="${ignored ? 0 : 1}">${ignored ? "恢复提醒" : "不提醒这个"}</button></div>
         ${open ? `<div class="files">${esc(r.files.join("\n"))}</div>` : ""}</div>`;
     }).join("");
@@ -296,7 +304,7 @@ window.addEventListener("hashchange", () => { render(); const y = +(sessionStora
 window.addEventListener("scroll", () => { try { sessionStorage.setItem(scrollKey(), String(window.scrollY)); } catch { } }, { passive: true });
 
 document.addEventListener("click", async e => {
-  const t = e.target.closest("[data-go],[data-back],[data-keep],[data-cycle],[data-del],[data-act],[data-push],[data-files],[data-ignore],[data-tech]");
+  const t = e.target.closest("[data-go],[data-back],[data-keep],[data-cycle],[data-del],[data-act],[data-push],[data-job],[data-files],[data-ignore],[data-tech]");
   if (!t) return;
   const d = t.dataset;
   if (d.go !== undefined) { try { sessionStorage.removeItem("idea.scroll." + d.go); } catch { } go(d.go); return; }
@@ -306,16 +314,36 @@ document.addEventListener("click", async e => {
   if (d.act === "reload") { load(); return; }
   if (d.act === "update") { e.preventDefault(); APP?.checkUpdate(); return; }
   try {
-    if (d.keep) await api("/api/journey/ideas", { text: d.keep, project: d.proj, origin: d.from });
+    if (d.keep) {
+      if (t.disabled) return;
+      t.disabled = true; t.textContent = "✓";
+      try { await api("/api/journey/ideas", { text: d.keep, project: d.proj, origin: d.from }); }
+      catch (err) { t.disabled = false; t.textContent = "＋"; throw err; }
+    }
     else if (d.cycle) {
       const i = S.data.ideas.find(x => x.id == d.cycle), ks = Object.keys(IDEA_STATUS);
       await api(`/api/journey/ideas/${d.cycle}`, { status: ks[(ks.indexOf(i.status) + 1) % ks.length] });
     } else if (d.del) { if (!await ask("删除这个点子？", "删除后找不回来。", "删除")) return; await api(`/api/journey/ideas/${d.del}/delete`, {}); }
     else if (d.act === "add-idea") {
-      const text = $("#newIdea").value.trim(); if (!text) return;
-      await api("/api/journey/ideas", { text, project: $("#newProj").value });
+      const box = $("#newIdea"), text = box.value.trim(); if (!text) return;
+      const project = $("#newProj").value;
+      // show it at once and empty the box: the save (and the reload after it) can take seconds on a slow link,
+      // and a box that still holds the text invites more taps - each one saved another copy
+      const tmp = { id: -Date.now(), text, project: project || null, status: "new", created: Date.now() / 1000 };
+      S.data.ideas = [tmp, ...(S.data.ideas || [])]; render();
+      try { await api("/api/journey/ideas", { text, project }); }
+      catch (err) { S.data.ideas = S.data.ideas.filter(i => i !== tmp); render(); $("#newIdea").value = text; throw err; }
     } else if (d.ignore) await api("/api/journey/ignore", { repo: d.ignore, ignore: d.on === "1" });
-    else if (d.push) {
+    else if (d.job) {
+      const Q = {
+        create_private: [`给 ${d.repo} 建私有 GitHub 仓库？`, "在你的 GitHub 建一个私有仓库，把整个文件夹传上去（没有 git 的会先初始化；会补一份 .gitignore，像密码/密钥的文件和超过 50MB 的文件不会传，遇到会停下来告诉你）。只有你自己能看到。", "建库并上传"],
+        create_public: [`给 ${d.repo} 建【公开】GitHub 仓库？`, "任何人都能看到这个仓库的全部代码。会先检查有没有像密钥的文件，有就停下不传。确定要公开吗？", "公开并上传"],
+        make_public: [`把 ${d.repo} 改成【公开】？`, "改成公开后任何人都能看到全部代码和历史提交，之后再改回私有，期间被别人下载或缓存的内容收不回来。会先检查历史里有没有像密钥的文件，有就不改。", "改成公开"],
+        make_private: [`把 ${d.repo} 改成私有？`, "改成私有后只有你能看到。公开期间别人已经下载或缓存的内容收不回来。", "改成私有"],
+      }[d.job];
+      if (!Q || !await ask(Q[0], Q[1] + "\n家里电脑收到后半分钟内开始。", Q[2])) return;
+      await api("/api/journey/jobs", { kind: d.job, repo: d.repo });
+    } else if (d.push) {
       const r = S.data.repos.list.find(x => x.name === d.push);
       const what = [r.dirty ? `提交 ${r.dirty} 个改动的文件` : "", r.unpushed ? `推送 ${r.unpushed} 个本地提交` : ""].filter(Boolean).join("，再");
       if (!await ask(`推送 ${r.name} 到 GitHub？`, `${what || "推送"}。\n会提交仓库里所有改动（.gitignore 里的除外）；像密码/密钥的文件会被拦下。家里电脑收到后半分钟内开始。`, "推送")) return;
@@ -333,6 +361,32 @@ document.addEventListener("input", e => {
   }
 });
 
+// pull down at the top of the page to refresh now (the page also reloads itself every 20 s)
+{
+  const bar = document.createElement("div");
+  bar.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:50;display:flex;justify-content:center;pointer-events:none;transform:translateY(-60px);transition:transform .2s";
+  bar.innerHTML = '<div style="margin-top:calc(env(safe-area-inset-top,0px) + 10px);background:var(--card);color:var(--text);box-shadow:0 2px 14px rgba(0,0,0,.18);border-radius:20px;padding:7px 16px;font-size:13px"></div>';
+  document.body.appendChild(bar);
+  const label = bar.firstChild, THRESHOLD = 90;
+  let y0 = null, dist = 0, busy = false;
+  const show = (text, y) => { label.textContent = text; bar.style.transition = "transform .2s"; bar.style.transform = `translateY(${y}px)`; };
+  const hide = () => show("", -60);
+  document.addEventListener("touchstart", e => { y0 = !busy && window.scrollY <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; dist = 0; }, { passive: true });
+  document.addEventListener("touchmove", e => {
+    if (y0 === null) return;
+    dist = e.touches[0].clientY - y0;
+    if (dist > 8 && window.scrollY <= 0) { bar.style.transition = "none"; show(dist >= THRESHOLD ? "松开刷新" : "下拉刷新", Math.min(dist / 3, 40)); }
+  }, { passive: true });
+  document.addEventListener("touchend", async () => {
+    if (y0 === null) return;
+    const go = dist >= THRESHOLD; y0 = null; dist = 0;
+    if (!go) { hide(); return; }
+    busy = true; show("刷新中…", 20);
+    await load();
+    show(S.offline ? "连不上服务器，显示的是旧数据" : "已刷新", 20);
+    setTimeout(() => { hide(); busy = false; }, 900);
+  }, { passive: true });
+}
 { const c = stored("idea.cache"); if (c) { try { S.data = JSON.parse(c); render(); } catch { } } }   // show the last copy at once
 load();
 setInterval(() => { if (!document.hidden && !document.activeElement?.matches("input,textarea,select")) load(); }, 20000);

@@ -19,7 +19,7 @@ from pathlib import Path
 from aiohttp import web
 
 IDEA_STATUS = ("new", "doing", "done", "dropped")
-JOB_KINDS = ("push",)
+JOB_KINDS = ("push", "create_private", "create_public", "make_private", "make_public")
 
 
 class Journey:
@@ -76,6 +76,10 @@ class Journey:
 
     def add_idea(self, text: str, project: str | None, note: str | None, origin: str | None) -> int:
         now = time.time()
+        dup = self.db.execute("SELECT id FROM ideas WHERE text = ? AND COALESCE(project, '') = ? AND created > ? ORDER BY id DESC LIMIT 1",
+                              (text, project or "", now - 60)).fetchone()
+        if dup:                                   # the same text again within a minute is a double tap, not a new idea
+            return dup[0]
         cur = self.db.execute("INSERT INTO ideas (text, project, note, status, origin, created, updated) VALUES (?, ?, ?, 'new', ?, ?, ?)",
                               (text, project, note, origin, now, now))
         self.db.commit()

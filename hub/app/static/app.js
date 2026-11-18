@@ -268,6 +268,7 @@ function summary(d, short = false) {
     const due = k === "ac" && S.model.ac_clean?.[r.main]?.due;
     if (c.s === "off") return { text: due ? "已关闭 · 该清洁了" : "已关闭" + (!short && c.a.current_temperature != null ? ` · 室温${fmtNum(c.a.current_temperature)}°` : "") };
     const t = c.a.temperature != null ? ` ${fmtNum(c.a.temperature)}°` : "";
+    if (k === "heater") return { text: `${c.a.hvac_action === "idle" ? "保温" : "加热"}${t}` };
     return { text: `${HVAC[c.s] ?? c.s}${t}${c.a.preset_mode ? " · " + c.a.preset_mode : ""}` };
   }
   if (k in KITCHEN_KINDS && window.kitchenSummary) return { text: kitchenSummary(d) };
@@ -1263,6 +1264,7 @@ async function comfortSend(id, on, target) {
 function renderDetail(d) {
   if (d.kind === "washer" && window.renderWasher && wPrefix(d)) return renderWasher(d);   // washer_ui.js
   if (d.kind in KITCHEN_KINDS && d.kx && !deviceOffline(d) && window.renderKitchen) return renderKitchen(d);   // kitchen_ui.js
+  if (d.kind === "heater" && window.renderHeater && d.roles.main?.startsWith("climate.") && !deviceOffline(d) && !dead(st(d.roles.main).s)) return renderHeater(d);   // heater_ui.js
   if ((d.kind === "ac" || d.kind === "heater") && d.roles.main?.startsWith("climate.") && !deviceOffline(d) && !dead(st(d.roles.main).s)) return renderAc(d);
   const sm = summary(d, true), off = deviceOffline(d), active = !off && deviceActive(d);
   const main = d.toggles[0];
@@ -1663,6 +1665,7 @@ window.hhBack = () => {
   if (window.hhCamClose) { window.hhCamClose(); return true; }
   if (drag.active) return true;
   if ($("#sheet")) { closeSheet(); return true; }
+  if (S.htPage && window.htBack && window.htBack()) return true;   // heater sub pages
   if ($("#wpage")) { closeWeather(); return true; }
   if ($("#epage")) { closeEnergy(); return true; }
   if ($("#kpage")) { closeKPage(); return true; }

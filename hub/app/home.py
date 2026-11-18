@@ -192,7 +192,7 @@ def build_device(dev: dict, area_name: str | None, ents: list[Ent]) -> dict | No
     ac_x = {}
     if kind in ("ac", "heater"):
         for e in ents:
-            for key, suf in AC_EXTRA.items():
+            for key, suf in {**AC_EXTRA, **(HEATER_EXTRA if kind == "heater" else {})}.items():
                 if e.entity_id.endswith(suf):
                     ac_x[key] = e.entity_id
 
@@ -239,6 +239,15 @@ AC_EXTRA = {
     "filter_life": "_filter_life_level_p_21_1", "filter_type": "_filter_screen_type_p_2_38",
     "kwh": "_power_consumption_p_20_1", "hours": "_running_duration_p_9_5", "fan_lever": "_realindoor_fan_lever_p_12_5",
     "clean": "_clean_p_9_1",
+}
+
+
+# The baseboard heater's own properties (xiaomi.heater.ma9): 延时关闭, 安睡模式 (custom sleep), the humidifier module.
+HEATER_EXTRA = {
+    "delay_on": "_delay_p_10_1", "delay_time": "_delay_time_p_10_2", "delay_left": "_delay_remain_time_p_10_3",
+    "hum_on": "_on_p_8_4", "hum_gear": "_gear_p_8_1", "hum_led": "_indicator_p_8_3",
+    "sleep_on": "_custom_sleep_enabled_p_11_2", "sleep_active": "_custom_sleep_activated_p_11_3", "sleep_cfg": "_custom_sleep_settings_p_11_1",
+    "screen": "_on_p_9_1", "lock": "_physical_controls_locked_p_5_1", "status": "_status_p_2_3",
 }
 
 

@@ -42,8 +42,9 @@ CACHE = STATE / "levels.json"
 WORK = STATE / "work"                                 # cwd for claude -p, so its runs land nowhere near the projects
 LOG = STATE / "collector.log"
 CHUNK_CHARS = 60_000
-QUIET_SECONDS = 30 * 60                               # a chat counts as finished after 30 min without new lines
-MODEL = os.environ.get("JOURNEY_MODEL", "sonnet")
+QUIET_SECONDS = int(os.environ.get("JOURNEY_QUIET", "300"))        # a chat idle this long counts as finished and gets summarised
+MODEL = os.environ.get("JOURNEY_MODEL", "haiku")                 # chunk summaries: the cheap model (quota)
+SIMPLE_MODEL = os.environ.get("JOURNEY_SIMPLE_MODEL", "haiku")   # commit messages and other short jobs
 SECRET_RE = re.compile(r"(^|[\\/])(\.env(\.(?!example$|sample$)[^\\/]*)?|[^\\/]*\.(pem|key|p12|pfx|jks|keystore)|local\.properties|"
                        r"auth\.json|[^\\/]*(secret|password|passwd|token|credential)s?[^\\/]*\.(json|txt|ya?ml|ini|cfg|conf|env|properties))$", re.I)
 CTX = ssl.create_default_context()
@@ -151,6 +152,27 @@ def infer_project(text: str, fallback: str, where: dict | None = None) -> str:
         return fallback
     best = max(counts, key=counts.get)
     return best if counts[best] >= 2 else fallback
+
+
+def redirect_project(text: str, project: str) -> str:
+    """A chat started in one project folder (ClaudeRemote) can spend a whole stretch editing another (HomeHub's files): when the
+    paths in this stretch point mostly elsewhere, the stretch belongs there."""
+    names = {d.name.lower(): d.name for d in GITHUB.iterdir() if d.is_dir()}
+    counts: dict = {}
+    for m in PATH_RE.finditer(text):
+        n = names.get(m.group(1).lower())
+        if n:
+            counts[n] = counts.get(n, 0) + 1
+    low = text.lower()
+    for low_name, n in names.items():                      # the compressed record keeps few full paths, but the names stay
+        if len(low_name) >= 5:
+            k = low.count(low_name)
+            if k:
+                counts[n] = counts.get(n, 0) + k
+    if not counts:
+        return project
+    top = max(counts, key=counts.get)
+    return top if top != project and counts[top] >= 8 and counts[top] > 2 * counts.get(project, 0) else project
 
 
 def _short(s, n):
@@ -349,9 +371,9 @@ def claude_exe() -> str:
     return max(cands, key=os.path.getmtime)
 
 
-def ask_claude(prompt: str, schema: dict | None, timeout=900) -> dict | str:
+def ask_claude(prompt: str, schema: dict | None, timeout=900, model: str | None = None) -> dict | str:
     WORK.mkdir(parents=True, exist_ok=True)
-    cmd = [claude_exe(), "-p", "--model", MODEL, "--output-format", "json", "--no-session-persistence",
+    cmd = [claude_exe(), "-p", "--model", model or MODEL, "--output-format", "json", "--no-session-persistence",
            "--tools", "", "--setting-sources", ""]
     if schema:
         cmd += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
@@ -419,7 +441,7 @@ def summarise(limit: int | None = None):
             if len(c["text"]) < 400:
                 continue                       # a one-line chat is not a node
             when = (c["start_ts"] or "")[:10]
-            proj = infer_project(c["text"], project, c.get("where")) if project in ("Github(总目录)", "其他") else project
+            proj = infer_project(c["text"], project, c.get("where")) if project in ("Github(总目录)", "其他") else redirect_project(c["text"], project)
             log(f"summarise {proj} {cid} ({len(c['text'])} chars)")
             try:
                 prompt = PROMPT.format(source="Claude Code" if source == "claude" else "Codex", project=proj,
@@ -482,12 +504,38 @@ def candidates() -> list[Path]:
 _me = None
 
 
+def _find_gh() -> str:
+    """The background task has a short PATH: look in the usual install places too."""
+    import shutil
+    for c in (shutil.which("gh"), r"C:\Program Files\GitHub CLI\gh.exe", r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+              str(Path.home() / "AppData/Local/Programs/GitHub CLI/gh.exe")):
+        if c and Path(c).exists():
+            return c
+    return "gh"
+
+
+GH = _find_gh()
+
+
+def _gh_env() -> dict:
+    """gh finds its login through USERPROFILE/APPDATA; the background task may not pass them on."""
+    e = dict(os.environ)
+    home = e.get("USERPROFILE") or str(Path.home())
+    e.setdefault("USERPROFILE", home)
+    e.setdefault("APPDATA", home + r"\AppData\Roaming")
+    e.setdefault("LOCALAPPDATA", home + r"\AppData\Local")
+    tok = STATE / "gh_token"          # the background task cannot see gh's own login (it lives in the interactive profile)
+    if tok.exists() and not e.get("GH_TOKEN"):
+        e["GH_TOKEN"] = tok.read_text(encoding="utf-8").strip()
+    return e
+
+
 def my_login() -> str:
     """The GitHub account the user pushes as (gh CLI); repos cloned from someone else are not theirs to push."""
     global _me
     if _me is None:
         try:
-            _me = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, timeout=20,
+            _me = subprocess.run([GH, "api", "user", "--jq", ".login"], capture_output=True, text=True, timeout=20, env=_gh_env(),
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
         except Exception:
             _me = ""
@@ -500,6 +548,35 @@ def my_login() -> str:
                         owners[m.group(1)] = owners.get(m.group(1), 0) + 1
             _me = max(owners, key=owners.get) if owners else ""
     return _me
+
+
+_vis: dict = {}
+
+
+def gh(*args, timeout=60) -> subprocess.CompletedProcess:
+    return subprocess.run([GH, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=_gh_env(),
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def slug_of(remote: str) -> str:
+    return re.sub(r"\.git$", "", remote.split("github.com")[-1].lstrip(":/"))
+
+
+def visibility(slug: str) -> str | None:
+    """'public' / 'private' from GitHub (cached 10 min); None when gh cannot tell."""
+    hit = _vis.get(slug)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    try:
+        r = gh("repo", "view", slug, "--json", "visibility", "--jq", ".visibility", timeout=20)
+        v = r.stdout.strip().lower() if r.returncode == 0 else None
+        if v is None:
+            log("  gh repo view", slug, "failed:", (r.stderr or r.stdout)[-200:])
+    except Exception as e:
+        log("  gh repo view", slug, "error:", repr(e))
+        v = None
+    _vis[slug] = (time.time(), v)
+    return v
 
 
 def scan_repo(d: Path) -> dict:
@@ -532,6 +609,8 @@ def scan_repo(d: Path) -> dict:
                 upstream=upstream, dirty=len(lines) - 1 if head else len(lines), files=files, unpushed=unpushed,
                 last_commit=last[0] if last and last[0] else None, last_msg=last[1] if len(last) > 1 else None,
                 secrets=[f for f in files if SECRET_RE.search(f.split(" -> ")[-1].strip('"'))])
+    if owner and mine:
+        info["visibility"] = visibility(slug_of(remote))
     return info
 
 
@@ -546,18 +625,59 @@ def scan():
     return repos
 
 
-def commit_message(repo: Path) -> str:
+def recent_nodes(repo: Path, since: str | None) -> list[dict]:
+    """The Idea nodes of this project worked on since the last commit: they hold the reason behind the diff."""
+    name = repo.name
+    try:
+        chunks = hub("GET", "/api/journey").get("chunks", [])
+    except Exception:
+        return []
+    out = []
+    for c in chunks:
+        if c.get("project") != name and not any(n.get("project") == name for n in (c.get("nodes") or [])):
+            continue
+        if since and (c.get("end_ts") or "") < since:
+            continue
+        for n in c.get("nodes") or []:
+            if (n.get("project") or c.get("project")) == name:
+                out.append({"ts": c.get("end_ts") or "", **n})
+    out.sort(key=lambda n: n["ts"])
+    return out[-6:]
+
+
+def why_block(repo: Path) -> str:
+    since = git(repo, "log", "-1", "--format=%cI").stdout.strip() or None
+    lines = []
+    for n in recent_nodes(repo, since):
+        bits = [f"- 节点「{n.get('title', '')}」（{n.get('status', '')}）", f"  起因：{n.get('trigger', '')}"]
+        if n.get("root_cause"):
+            bits.append(f"  根因/关键做法：{n['root_cause']}")
+        fails = [a for a in n.get("attempts") or [] if not a.get("ok")]
+        if fails:
+            bits.append("  走不通的路：" + "；".join(f"{a.get('what', '')}（{a.get('why', '')}）" for a in fails[:3]))
+        lines.append("\n".join(bits))
+    return "\n".join(lines)
+
+
+def commit_message(repo: Path, first: bool = False) -> str:
     stat = git(repo, "diff", "--cached", "--stat").stdout[-3000:]
     diff = git(repo, "diff", "--cached", "--unified=1").stdout[:20000]
+    why = "" if first else why_block(repo)
+    ask = "根据下面的 git 改动写一条提交信息：第一行≤60字符的英文概括（祈使句），空一行后用中文列 2-5 条要点说明改了什么；"
+    if why:
+        ask += ("再空一行，写一段以「为什么：」开头的中文（2-4 句），依据下面给出的开发记录讲清这次改动的起因、试过哪些走不通的路、"
+                "最后为什么这么做；只使用记录里真实有的内容，不要编造，和改动无关的记录跳过。")
+    ask += "只输出提交信息本身。\n\n"
+    if why:
+        ask += "【开发记录（Idea 里这个项目最近的节点）】\n" + why + "\n\n"
     try:
-        msg = ask_claude("根据下面的 git 改动写一条提交信息：第一行≤60字符的英文概括（祈使句），空一行后用中文列 2-5 条要点。"
-                         "只输出提交信息本身。\n\n" + stat + "\n\n" + diff, None, timeout=300).strip()
+        msg = ask_claude(ask + stat + "\n\n" + diff, None, timeout=300, model=SIMPLE_MODEL).strip()
         if msg:
             return msg
     except Exception as e:
         log("  commit message via claude failed:", e)
     n = len(git(repo, "diff", "--cached", "--name-only").stdout.split())
-    return f"Update {n} files ({datetime.now():%Y-%m-%d})"
+    return f"{'Initial commit' if first else 'Update'} {n} files ({datetime.now():%Y-%m-%d})"
 
 
 def do_push(name: str) -> tuple[str, dict]:
@@ -594,6 +714,143 @@ def do_push(name: str) -> tuple[str, dict]:
     return "done", steps
 
 
+DEFAULT_IGNORE = """# added by Idea: things that must never reach GitHub, and build leftovers
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+local.properties
+secrets.properties
+keystore.properties
+auth.json
+node_modules/
+__pycache__/
+*.pyc
+.gradle/
+build/
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
+"""
+BIG_FILE = 50 * 1024 * 1024
+LEAK_RE = r"-----BEGIN [A-Z ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{35}"
+
+
+def ensure_gitignore(repo: Path):
+    f = repo / ".gitignore"
+    have = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+    have_lines = {x.strip() for x in have.splitlines()}
+    need = [x for x in DEFAULT_IGNORE.splitlines() if x and not x.startswith("#") and x not in have_lines]
+    if not f.exists():
+        f.write_text(DEFAULT_IGNORE, encoding="utf-8")
+    elif need:
+        f.write_text(have.rstrip("\n") + "\n\n# added by Idea\n" + "\n".join(need) + "\n", encoding="utf-8")
+
+
+def history_leaks(repo: Path) -> list[str]:
+    """What making the repo public would expose: secret-looking file names anywhere in history, and key/token patterns
+    in the current files. Not a guarantee, but it stops the usual accidents."""
+    bad = set()
+    names = git(repo, "log", "--all", "--name-only", "--pretty=format:", timeout=120).stdout.split("\n")
+    for n in {x.strip() for x in names if x.strip()}:
+        if SECRET_RE.search(n):
+            bad.add(n)
+    g = git(repo, "grep", "-I", "-l", "-E", LEAK_RE, "HEAD", timeout=120)
+    for ln in g.stdout.splitlines():
+        bad.add(ln.split(":", 1)[-1] + "（内容像密钥）")
+    return sorted(bad)
+
+
+def do_create(name: str, public: bool) -> tuple[str, dict]:
+    if "\\" in name or "/" in name:
+        return "failed", {"error": "只能给 D:\\Github 下的一级项目文件夹建库"}
+    repo = (GITHUB / name).resolve()
+    if repo.parent != GITHUB.resolve() or not repo.is_dir():
+        return "failed", {"error": "找不到这个项目文件夹"}
+    me = my_login()
+    if not me:
+        return "failed", {"error": "没读到 GitHub 登录（gh auth status）"}
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.") or "project"
+    if gh("repo", "view", f"{me}/{slug}").returncode == 0:
+        return "failed", {"error": f"GitHub 上已经有 {me}/{slug}，没有创建（避免覆盖）"}
+    steps = {}
+    fresh = not (repo / ".git").exists()
+    if not fresh and git(repo, "remote", "get-url", "origin").stdout.strip():
+        return "failed", {"error": "这个仓库已经有远程地址了"}
+    ensure_gitignore(repo)
+    if fresh:
+        i = git(repo, "init", "-q", "-b", "main")
+        if i.returncode:
+            return "failed", {"error": "git init 失败", "detail": i.stderr[-400:]}
+        steps["init"] = "ok"
+    git(repo, "add", "-A")
+    staged = [f for f in git(repo, "diff", "--cached", "--name-only").stdout.split("\n") if f]
+    has_head = git(repo, "rev-parse", "--verify", "-q", "HEAD").returncode == 0
+    bad = [f for f in staged if SECRET_RE.search(f)]
+    big = [f for f in staged if (repo / f).is_file() and (repo / f).stat().st_size > BIG_FILE]
+    if bad or big or (not staged and not has_head):
+        git(repo, "reset", "-q")
+        if bad:
+            return "failed", {"error": "里面有像密码/密钥的文件，没有上传；加进 .gitignore 再试", "files": bad}
+        if big:
+            return "failed", {"error": "有超过 50MB 的大文件（GitHub 单个文件上限 100MB），没有上传；加进 .gitignore 再试", "files": big[:20]}
+        return "failed", {"error": "文件夹里没有可上传的文件"}
+    if staged:
+        msg = commit_message(repo, first=not has_head) + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
+        c = subprocess.run(["git", "-C", str(repo), "commit", "-q", "-F", "-"], input=msg, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if c.returncode:
+            return "failed", {"error": "提交失败", "detail": (c.stderr or c.stdout)[-800:]}
+        steps["commit"] = msg.splitlines()[0]
+    if public:
+        leaks = history_leaks(repo)
+        if leaks:
+            return "failed", {"error": "公开会让这些内容被所有人看到，先处理再公开（已提交在本地，没上传）", "files": leaks[:20], **steps}
+    r = gh("repo", "create", f"{me}/{slug}", "--public" if public else "--private", "--source", str(repo),
+           "--remote", "origin", "--push", timeout=300)
+    if r.returncode:
+        return "failed", {"error": "GitHub 建库/上传失败", "detail": (r.stderr or r.stdout)[-800:], **steps}
+    steps["repo"] = f"{me}/{slug}（{'公开' if public else '私有'}）"
+    return "done", steps
+
+
+def do_visibility(name: str, public: bool) -> tuple[str, dict]:
+    repo = (GITHUB / name).resolve()
+    if GITHUB.resolve() not in repo.parents or not (repo / ".git").exists():
+        return "failed", {"error": "不是 D:\\Github 下的 git 仓库"}
+    info = scan_repo(repo)
+    if not info.get("mine", True) or not info.get("remote"):
+        return "failed", {"error": "不是你自己的、有远程的仓库"}
+    slug = slug_of(info["remote"])
+    if public:
+        leaks = history_leaks(repo)
+        if leaks:
+            return "failed", {"error": "公开会让这些内容被所有人看到（包括历史提交），没有改", "files": leaks[:20]}
+    r = gh("repo", "edit", slug, "--visibility", "public" if public else "private",
+           "--accept-visibility-change-consequences", timeout=60)
+    _vis.pop(slug, None)
+    if r.returncode:
+        return "failed", {"error": "改可见性失败", "detail": (r.stderr or r.stdout)[-800:]}
+    return "done", {"repo": slug, "visibility": "public" if public else "private"}
+
+
+def do_job(kind: str, repo: str) -> tuple[str, dict]:
+    if kind == "push":
+        return do_push(repo)
+    if kind in ("create_private", "create_public"):
+        return do_create(repo, kind == "create_public")
+    if kind in ("make_private", "make_public"):
+        return do_visibility(repo, kind == "make_public")
+    return "failed", {"error": f"不认识的任务 {kind}"}
+
+
 def run_jobs():
     for job in hub("GET", "/api/journey/jobs?open=1"):
         if job["status"] != "queued":
@@ -601,7 +858,7 @@ def run_jobs():
         log("job", job["id"], job["kind"], job["repo"])
         hub("POST", f"/api/journey/jobs/{job['id']}", {"status": "running"})
         try:
-            status, result = do_push(job["repo"])
+            status, result = do_job(job["kind"], job["repo"])
         except Exception as e:
             status, result = "failed", {"error": str(e)}
         log("  ->", status, result)
