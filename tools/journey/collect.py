@@ -485,9 +485,27 @@ def post_level(cache: dict, cid: str):
 
 # ---------------------------------------------------------------- git
 
+def _proxy_env(base: dict | None = None) -> dict:
+    """github.com is only reachable through the PC's proxy (Clash). A shell has HTTPS_PROXY set; the background task does not,
+    and git ignores the Windows system proxy: take it from the system setting."""
+    e = dict(base if base is not None else os.environ)
+    if not (e.get("HTTPS_PROXY") or e.get("https_proxy")):
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as k:
+                if winreg.QueryValueEx(k, "ProxyEnable")[0]:
+                    srv = str(winreg.QueryValueEx(k, "ProxyServer")[0]).split(";")[0].split("=")[-1].strip()
+                    if srv:
+                        url = srv if "://" in srv else "http://" + srv
+                        e["HTTPS_PROXY"] = e["HTTP_PROXY"] = url
+        except Exception:
+            pass
+    return e
+
+
 def git(repo: Path, *args, timeout=60) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                          errors="replace", timeout=timeout, env=_proxy_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def candidates() -> list[Path]:
@@ -519,7 +537,7 @@ GH = _find_gh()
 
 def _gh_env() -> dict:
     """gh finds its login through USERPROFILE/APPDATA; the background task may not pass them on."""
-    e = dict(os.environ)
+    e = _proxy_env()
     home = e.get("USERPROFILE") or str(Path.home())
     e.setdefault("USERPROFILE", home)
     e.setdefault("APPDATA", home + r"\AppData\Roaming")
