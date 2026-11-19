@@ -69,11 +69,27 @@ function htBack() {
   return true;
 }
 
+// The wish (what the person set) is kept by the hub, which holds the room at it using the ROOM THERMOMETER, not the heater's own
+// (too warm) sensor: heater_ctl.py. Without a thermometer in the room it falls back to the heater's own number.
+const htWish = d => S.model.heater?.[d.roles.main]?.target ?? st(d.roles.main).a.temperature;
+const htRoom = d => (typeof deskTemp === "function" ? deskTemp(d) : null);
 function heaterState(d) {
-  const s = st(d.roles.main), a = s.a, on = s.s !== "off", cur = a.current_temperature, tgt = a.temperature;
-  if (!on) return { on, text: "已关机" + (cur != null ? ` · 室温 ${fmtNum(cur)}°` : "") };
-  const heating = a.hvac_action === "heating" || (a.hvac_action == null && cur != null && tgt != null && cur < tgt);
-  return { on, heating, text: heating ? "加热中" : "已到温 · 保温中" };
+  const s = st(d.roles.main), a = s.a, on = s.s !== "off", room = htRoom(d), cur = room ?? a.current_temperature, tgt = htWish(d);
+  if (!on) return { on, room, text: "已关机" + (cur != null ? ` · 室温 ${fmtNum(Math.round(cur * 10) / 10)}°` : "") };
+  const heating = cur != null && tgt != null ? cur < tgt : a.hvac_action === "heating";
+  return { on, room, heating, text: heating ? "加热中" : "已到温 · 保温中" };
+}
+let HT_TGT_T = null;
+function htSetTarget(d, v) {          // the wish changes at once on screen; the hub keeps the room there
+  const id = d.roles.main, a = st(id).a;
+  v = Math.min(a.max_temp ?? 28, Math.max(a.min_temp ?? 16, v));
+  S.model.heater = { ...(S.model.heater || {}), [id]: { ...(S.model.heater?.[id] || {}), target: v } };
+  render();
+  clearTimeout(HT_TGT_T);
+  HT_TGT_T = setTimeout(async () => {
+    try { await api("/api/heater", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entity_id: id, target: v }) }); }
+    catch (e) { toast("设置失败：" + e.message); load(); }
+  }, 450);
 }
 
 // ---- 安睡模式: "{sleepStage:[{t:24,d:1},...],postAction:{a:off,d:0},repeatA:[...],repeat:8,startTime:23-00}" (not JSON)
@@ -101,7 +117,7 @@ function renderHeater(d) {
     return v === "zones" ? htZonesPage(d) : v === "timer" ? htTimerPage(d) : v === "tedit" ? htTimerEdit(d) : htSleepPage(d);
   }
   const x = d.ac || {}, id = d.roles.main, s = st(id), a = s.a, h = heaterState(d), on = h.on;
-  const step = a.target_temp_step || 1, lo = a.min_temp ?? 16, hi = a.max_temp ?? 28, tgt = a.temperature, cur = a.current_temperature;
+  const step = a.target_temp_step || 1, lo = a.min_temp ?? 16, hi = a.max_temp ?? 28, tgt = htWish(d), cur = h.room ?? a.current_temperature;
   const dim = on ? "" : "idle";
   const delayOn = x.delay_on && isOn(x.delay_on), delayH = x.delay_time ? num(x.delay_time) : null;
   const sleepOn = x.sleep_on && isOn(x.sleep_on), sleepLive = x.sleep_active && isOn(x.sleep_active);
@@ -120,10 +136,11 @@ function renderHeater(d) {
         <button class="htpw ${on ? "on" : "off"}" aria-label="${on ? "关闭" : "开启"}">${AI.power}</button>
         <div class="htpt"><b>${on ? "关闭" : "开启"}</b><small>${on ? "点一下关机" : "点一下开机"}</small></div></div>
       <div class="accard acctl ${dim}">
-        <div class="htt"><b>目标温度</b><span>${tgt != null ? `加热到 ${fmtNum(tgt)}° 后进入保温` : ""}</span></div>
-        <div class="htset"><button class="pm" ${!on || tgt == null || tgt <= lo ? "disabled" : ""} data-temp="${id}" data-d="${-step}">−</button>
+        <div class="htt"><b>目标温度</b><span>${tgt != null ? `室温到 ${fmtNum(tgt)}° 后进入保温` : ""}</span></div>
+        <div class="htset"><button class="pm" ${!on || tgt == null || tgt <= lo ? "disabled" : ""} data-ht="tgt|${-step}">−</button>
           <div class="fanbar" style="--p:${tgt != null ? ((tgt - lo) / (hi - lo)) * 100 : 0}%"><input type="range" min="${lo}" max="${hi}" step="${step}" value="${tgt ?? lo}" data-ht-range ${on ? "" : "disabled"}><span>${tgt != null ? fmtNum(tgt) : "--"}</span></div>
-          <button class="pm" ${!on || tgt == null || tgt >= hi ? "disabled" : ""} data-temp="${id}" data-d="${step}">+</button></div>
+          <button class="pm" ${!on || tgt == null || tgt >= hi ? "disabled" : ""} data-ht="tgt|${step}">+</button></div>
+        <div class="accf htcap" data-tick>${h.room != null ? `以${esc(d.room)}温湿度计为准 · 现在 ${fmtNum(Math.round(h.room * 10) / 10)}°，到 ${tgt != null ? fmtNum(tgt) : "--"}° 就不再加热，降温了再继续` : "这个房间没有温湿度计，按踢脚线自己的温度控制"}</div>
       </div>
       ${x.delay_on ? `<div class="accard ${dim}">
         ${row(AI.clock, "延时关闭", "", `<button class="sw ${delayOn ? "on" : ""}" style="--c:${COLORS.heater}" data-ht="delay-sw"></button>`)}
@@ -147,6 +164,7 @@ document.addEventListener("click", e => {
   const sw = (eid, v) => call(eid, v ? "turn_on" : "turn_off", {}, { s: v ? "on" : "off" });
   const rng = () => [a.min_temp ?? 16, a.max_temp ?? 28, 1];
   switch (act) {
+    case "tgt": return htSetTarget(d, (htWish(d) ?? 24) + (+arg));
     case "power": return call(id, on ? "turn_off" : "turn_on", {}, { s: on ? "off" : "heat" });
     case "delay-sw": return sw(x.delay_on, !isOn(x.delay_on));
     case "delay-time": {
@@ -175,6 +193,6 @@ document.addEventListener("change", e => {
   if (!r) return;
   busy = 0;
   const d = currentDevice(); if (!d) return;
-  const id = d.roles.main, v = parseFloat(r.value);
-  call(id, "set_temperature", { temperature: v }, { a: { ...st(id).a, temperature: v } });
+  busy = 0;
+  htSetTarget(d, parseFloat(r.value));
 });

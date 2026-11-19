@@ -272,7 +272,11 @@ class Bridge:
             elif service == "set_temperature" and set(data) <= {"entity_id", "temperature", "hvac_mode"}:
                 if "hvac_mode" in data:
                     writes += self._mode(data["hvac_mode"])
-                writes.append((2, 4, float(data["temperature"])))
+                # the target temperature is 2/4 on the air conditioner but 2/5 on the baseboard heater (2/4 is not a property there: -4002):
+                # ask the spec which one it is
+                spec = self._spec(dev.model)
+                tp = next((i for (sv, i), pr in (spec.props.items() if spec else []) if sv == 2 and pr.get("name") == "target-temperature"), 4)
+                writes.append((2, tp, float(data["temperature"])))
             elif service == "set_fan_mode" and set(data) == {"entity_id", "fan_mode"}:
                 spec = self._spec(dev.model)
                 writes = [(3, 2, spec.choice(3, 2, str(data["fan_mode"])))]

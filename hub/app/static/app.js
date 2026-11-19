@@ -268,7 +268,10 @@ function summary(d, short = false) {
     const due = k === "ac" && S.model.ac_clean?.[r.main]?.due;
     if (c.s === "off") return { text: due ? "已关闭 · 该清洁了" : "已关闭" + (!short && c.a.current_temperature != null ? ` · 室温${fmtNum(c.a.current_temperature)}°` : "") };
     const t = c.a.temperature != null ? ` ${fmtNum(c.a.temperature)}°` : "";
-    if (k === "heater") return { text: `${c.a.hvac_action === "idle" ? "保温" : "加热"}${t}` };
+    if (k === "heater") {
+      const wish = S.model.heater?.[r.main]?.target ?? c.a.temperature, room = typeof deskTemp === "function" ? deskTemp(d) : null, cur = room ?? c.a.current_temperature;
+      return { text: `${cur != null && wish != null ? (cur >= wish ? "保温" : "加热") : "加热"}${wish != null ? " " + fmtNum(wish) + "°" : ""}` };
+    }
     return { text: `${HVAC[c.s] ?? c.s}${t}${c.a.preset_mode ? " · " + c.a.preset_mode : ""}` };
   }
   if (k in KITCHEN_KINDS && window.kitchenSummary) return { text: kitchenSummary(d) };

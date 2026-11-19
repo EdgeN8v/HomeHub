@@ -73,6 +73,8 @@ function model() {
       nodes.push(node); seen.set(n.title, node);
     });
   }
+  const TP = S.data.topics || {};
+  for (const n of nodes) n.topic = (TP[n.project] || {})[n.id] || null;
   nodes.sort((a, b) => (a.start_ts || "").localeCompare(b.start_ts || ""));
   const projects = new Map();
   for (const n of nodes) {
@@ -109,8 +111,8 @@ function pendingRepos() {
 // ---------------------------------------------------------------- routes: #/  #/p/<project>  #/n/<node>  #/pits #/skills #/ideas #/repos
 function route() {
   const h = decodeURIComponent(location.hash.slice(1) || "/");
-  const m = h.match(/^\/(p|n)\/(.+)$/);
-  if (m) return { view: m[1] === "p" ? "project" : "node", arg: m[2] };
+  const m = h.match(/^\/(p|n|t)\/(.+)$/);
+  if (m) return { view: { p: "project", n: "node", t: "topic" }[m[1]], arg: m[2] };
   const tab = h.slice(1);
   return { view: ["pits", "skills", "ideas", "repos"].includes(tab) ? tab : "projects" };
 }
@@ -119,9 +121,9 @@ const go = h => { location.hash = h; };
 function render() {
   if (!S.data) return;
   const r = route();
-  const top = r.view === "project" || r.view === "node";
+  const top = r.view === "project" || r.view === "node" || r.view === "topic";
   $("#app").innerHTML = (top ? "" : header()) + ({
-    projects: viewProjects, project: () => viewProject(r.arg), node: () => viewNode(r.arg),
+    projects: viewProjects, project: () => viewProject(r.arg), node: () => viewNode(r.arg), topic: () => viewTopic(r.arg),
     pits: viewPits, skills: viewSkills, ideas: viewIdeas, repos: viewRepos,
   }[r.view])();
   document.title = "Idea";
@@ -171,9 +173,55 @@ function viewProjects() {
   }).join("");
 }
 
+const nodeCard = (n, i) => `<div class="step"><div class="dotnum ${STATUS_CLS[n.status] || "wip"}">${i + 1}</div>
+      <div class="card node" data-go="#/n/${encodeURIComponent(n.id)}">
+        <div class="row"><b class="grow">${KIND_ICON[n.kind] || "📌"} ${esc(n.title)}</b>${statusBadge(n.status)}</div>
+        <div class="muted">${esc(day(n.start_ts))} · 试了 ${n.attempts.length} 次 ${tries(n)}</div>
+        <div class="trig">${esc(n.trigger)}</div></div></div>`;
+const NEW_TOPIC = "新节点", SMALL_TOPIC = "其他零散";
+
+function viewTopic(arg) {
+  const k = arg.indexOf("/"), name = arg.slice(0, k), topic = arg.slice(k + 1);
+  const p = model().projects.find(x => x.name === name);
+  if (!p) return back("项目", "#/") + `<div class="card empty">没有这个项目</div>`;
+  const size = new Map();
+  p.nodes.forEach(n => size.set(n.topic, (size.get(n.topic) || 0) + 1));
+  const tp = n => !n.topic ? NEW_TOPIC : size.get(n.topic) < 3 ? SMALL_TOPIC : n.topic;
+  const ns = p.nodes.map((n, i) => ({ n, i })).filter(({ n }) => tp(n) === topic);
+  const solved = ns.filter(({ n }) => n.status === "解决").length;
+  return back(name, "#/p/" + encodeURIComponent(name)) + `<div class="card"><div class="ptitle">${esc(topic)}</div>
+      <div class="muted">${esc(name)} · ${ns.length} 个节点 · 解决 ${solved} · 失败尝试 ${ns.reduce((s, { n }) => s + fails(n), 0)}</div></div>
+    <div class="chain">${ns.reverse().map(({ n, i }) => nodeCard(n, i)).join("")}</div>`;
+}
+
+function viewTopics(p) {
+  const by = new Map();
+  const size = new Map();
+  p.nodes.forEach(n => size.set(n.topic, (size.get(n.topic) || 0) + 1));
+  p.nodes.forEach(n => { const t = !n.topic ? NEW_TOPIC : size.get(n.topic) < 3 ? SMALL_TOPIC : n.topic; if (!by.has(t)) by.set(t, []); by.get(t).push(n); });
+  const rows = [...by.entries()].map(([t, ns]) => ({ t, ns, last: ns.reduce((m, n) => ((n.end_ts || n.start_ts || "") > m ? (n.end_ts || n.start_ts) : m), "") }))
+    .sort((a, b) => b.last.localeCompare(a.last));
+  return rows.map(({ t, ns, last }) => {
+    const latest = [...ns].sort((a, b) => (b.end_ts || b.start_ts || "").localeCompare(a.end_ts || a.start_ts || ""))[0];
+    const solved = ns.filter(n => n.status === "解决").length;
+    return `<div class="card proj" data-go="#/t/${encodeURIComponent(p.name + "/" + t)}">
+      <div class="row"><b class="grow pname">${esc(t)}</b><span class="muted">${esc(day(last))}</span></div>
+      <div class="muted">${ns.length} 个节点 · 解决 ${solved} · 失败尝试 ${ns.reduce((s, n) => s + fails(n), 0)}</div>
+      <div class="trig">最近：${esc(latest.title)}</div></div>`;
+  }).join("");
+}
+
 function viewProject(name) {
   const p = model().projects.find(x => x.name === name);
   if (!p) return back("项目", "#/") + `<div class="card empty">没有这个项目</div>`;
+  if (p.nodes.filter(n => n.topic).length >= 10 && S.flat !== name) {
+    const solvedAll = p.nodes.filter(n => n.status === "解决").length;
+    return back("全部项目", "#/") + `<div class="card"><div class="ptitle">${esc(p.name)}</div>
+      <div class="muted">${esc(day(p.first))} 开始 · ${p.nodes.length} 个节点 · 解决 ${solvedAll} · 失败尝试 ${p.nodes.reduce((s, n) => s + fails(n), 0)}</div>
+      <div class="muted" style="margin-top:4px">按话题分好了，点一个话题看里面的节点。</div></div>
+      ${viewTopics(p)}
+      <div class="card empty" data-act="flat" data-name="${esc(name)}">不分话题，看全部节点（按时间） ›</div>`;
+  }
   const tech = techCount(p.nodes).slice(0, 16).map(t => `<span class="tag">${esc(t.name)} ${t.n}</span>`).join("");
   const solved = p.nodes.filter(n => n.status === "解决").length;
   const LIM = S.showAll === name ? Infinity : 40, hidden = Math.max(0, p.nodes.length - LIM);
@@ -327,6 +375,7 @@ document.addEventListener("click", async e => {
   if (d.files) { S.repoOpen.has(d.files) ? S.repoOpen.delete(d.files) : S.repoOpen.add(d.files); render(); return; }
   if (d.act === "reload") { load(); return; }
   if (d.act === "all") { S.showAll = d.name; render(); return; }
+  if (d.act === "flat") { S.flat = d.name; render(); window.scrollTo(0, 0); return; }
   if (d.act === "update") { e.preventDefault(); APP?.checkUpdate(); return; }
   try {
     if (d.keep) {

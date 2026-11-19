@@ -134,7 +134,8 @@ def _j(request) -> Journey:
 async def overview(request: web.Request):
     j = _j(request)
     return web.json_response({"chunks": j.chunks(), "ideas": j.ideas(), "repos": j.get("repos", {}),
-                              "ignored": j.get("ignored", []), "jobs": j.jobs(), "collector": j.get("collector", {})})
+                              "ignored": j.get("ignored", []), "jobs": j.jobs(), "collector": j.get("collector", {}),
+                              "topics": j.get("topics", {})})
 
 
 async def revision(request: web.Request):
@@ -144,8 +145,21 @@ async def revision(request: web.Request):
     q = lambda sql: j.db.execute(sql).fetchone()
     parts = [q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM chunks"), q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM ideas"),
              q("SELECT COUNT(*), COALESCE(MAX(updated), 0) FROM jobs")]
-    extra = [len(json.dumps(j.get("repos", {}), sort_keys=True)), len(json.dumps(j.get("ignored", []))), (j.get("collector", {}) or {}).get("state")]
+    extra = [len(json.dumps(j.get("repos", {}), sort_keys=True)), len(json.dumps(j.get("ignored", []))), len(json.dumps(j.get("topics", {}))), (j.get("collector", {}) or {}).get("state")]
     return web.json_response({"rev": "|".join(str(x) for r in parts for x in r) + "|" + "|".join(str(x) for x in extra)})
+
+
+async def post_topics(request: web.Request):
+    """The collector sorts each project's nodes into topics (washer, heater, camera...): {project, assign: {node id: topic}}."""
+    b = await request.json()
+    proj, assign = str(b.get("project", "")), b.get("assign") or {}
+    if not proj or not isinstance(assign, dict):
+        raise web.HTTPBadRequest(text="project and assign required")
+    j = _j(request)
+    topics = j.get("topics", {})
+    topics[proj] = {str(k): str(v)[:20] for k, v in assign.items()}
+    j.put("topics", topics)
+    return web.json_response({"saved": len(assign)})
 
 
 async def post_chunks(request: web.Request):
@@ -272,6 +286,7 @@ def setup(app: web.Application, data: Path):
         web.get("/api/journey/rev", revision),
         web.get("/api/journey/chunk-index", chunk_index),
         web.post("/api/journey/chunks", post_chunks),
+        web.post("/api/journey/topics", post_topics),
         web.post("/api/journey/repos", post_repos),
         web.post("/api/journey/heartbeat", heartbeat),
         web.post("/api/journey/ignore", ignore_repo),

@@ -154,6 +154,28 @@ def infer_project(text: str, fallback: str, where: dict | None = None) -> str:
     return best if counts[best] >= 2 else fallback
 
 
+# HomeHub was started inside a ClaudeRemote chat (2026-10-21 16:00) and every chat since inherited that folder: from that moment
+# on, chats whose working folder is ClaudeRemote are HomeHub work.
+FOLDER_MEANS = {"ClaudeRemote": ("2026-10-21T16:00", "HomeHub")}
+
+
+def effective_project(project: str, start_ts: str | None) -> str:
+    since = FOLDER_MEANS.get(project)
+    return since[1] if since and (start_ts or "") >= since[0] else project
+
+
+IDEA_TOKENS = re.compile(r"idea_app|journey|collect\.py|收集器|Idea")
+
+
+def idea_or(text: str, project: str) -> str:
+    """The Idea app lives inside the HomeHub folder (its page, hub routes, collector, Android shell), so paths say HomeHub; the
+    stretches of a chat that are about building Idea itself count as the project Idea."""
+    if project != "HomeHub":
+        return project
+    k = len(IDEA_TOKENS.findall(text))
+    return "Idea" if k >= 12 and k * 3 >= text.lower().count("homehub") else project
+
+
 def redirect_project(text: str, project: str) -> str:
     """A chat started in one project folder (ClaudeRemote) can spend a whole stretch editing another (HomeHub's files): when the
     paths in this stretch point mostly elsewhere, the stretch belongs there."""
@@ -409,6 +431,8 @@ def save_cache(c: dict):
 
 def summarise(limit: int | None = None):
     cache, done = load_cache(), 0
+    for cid in [k for k, lv in cache.items() if lv.get("v") == SCHEMA_VERSION and not lv.get("posted")]:
+        post_level(cache, cid)                 # re-labelled or not-yet-sent levels go out even when summarising is not possible now
     now = time.time()
     projects = "、".join(sorted(d.name for d in GITHUB.iterdir() if d.is_dir() and not d.name.startswith((".", "_"))))
     logs = sorted(all_logs(), key=lambda sp: os.path.getmtime(sp[1]), reverse=True)   # newest first: recent work shows up first
@@ -441,7 +465,7 @@ def summarise(limit: int | None = None):
             if len(c["text"]) < 400:
                 continue                       # a one-line chat is not a node
             when = (c["start_ts"] or "")[:10]
-            proj = infer_project(c["text"], project, c.get("where")) if project in ("Github(总目录)", "其他") else redirect_project(c["text"], project)
+            proj = infer_project(c["text"], project, c.get("where")) if project in ("Github(总目录)", "其他") else idea_or(c["text"], redirect_project(c["text"], effective_project(project, c.get("start_ts"))))
             log(f"summarise {proj} {cid} ({len(c['text'])} chars)")
             try:
                 prompt = PROMPT.format(source="Claude Code" if source == "claude" else "Codex", project=proj,
@@ -481,6 +505,68 @@ def post_level(cache: dict, cid: str):
         save_cache(cache)
     except Exception as e:
         log("  post failed:", e)
+
+
+# ---------------------------------------------------------------- topics: sort a big project's nodes into areas (washer, heater...)
+NL = chr(10)
+TOPICS_FILE = STATE / "topics.json"
+posted_topics: set = set()
+TOPIC_MIN = 15                                   # a project with fewer nodes stays one flat list
+TOPIC_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["assignments"],
+                "properties": {"assignments": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                               "required": ["i", "topic"], "properties": {"i": {"type": "integer"}, "topic": {"type": "string"}}}}}}
+
+
+def classify_topics():
+    """Give every node of a project with many nodes a topic (one device or area), so the page can open
+    project -> topic -> nodes. Done in batches by the cheap model; known topics are offered again so the names stay stable."""
+    try:
+        store = json.loads(TOPICS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        store = {}
+    folders = {d.name for d in GITHUB.iterdir() if d.is_dir()}
+    per: dict = {}
+    for cid, lv in load_cache().items():
+        if lv.get("v") != SCHEMA_VERSION or not lv.get("data"):
+            continue
+        for i, n in enumerate(lv["data"].get("nodes", [])):
+            proj = n.get("project") if n.get("project") in folders else lv.get("project")
+            per.setdefault(proj, []).append((lv.get("start_ts") or "", f"{cid}:{i}", n))
+    for proj, items in per.items():
+        if len(items) < TOPIC_MIN:
+            continue
+        items.sort(key=lambda x: x[0])
+        assign = store.setdefault(proj, {})
+        live = {nid for _, nid, _ in items}
+        for k in [k for k in assign if k not in live]:
+            del assign[k]                                  # a node that no longer exists (chunk re-summarised)
+        todo = [(nid, n) for _, nid, n in items if nid not in assign]
+        for k in range(0, len(todo), 90):
+            batch = todo[k:k + 90]
+            known = sorted(set(assign.values()))
+            lines = NL.join(f"{j}: {_short(n.get('title'), 40)} — {_short(n.get('trigger'), 60)}" for j, (_, n) in enumerate(batch))
+            prompt = (f"下面是项目「{proj}」的开发节点（编号: 标题 — 起因）。把每个节点归到一个「话题」：按它主要涉及的设备或功能领域分，"
+                      "例如 洗衣机、踢脚线、摄像头、空调、热水器、空气炸锅、地址与连接、部署与服务器、手机 App、首页与界面……" + NL +
+                      "规则：话题名不超过 6 个字，不含斜杠；已有话题尽量复用：" + ("、".join(known) or "（暂无）") + "；确实不属于再新建，"
+                      "全部话题控制在 16 个以内；一个节点只归一类，选最主要的；和具体设备无关的归「通用」。每个编号都要给出话题。" + NL + NL + lines)
+            try:
+                data = ask_claude(prompt, TOPIC_SCHEMA, timeout=600, model=SIMPLE_MODEL)
+            except Exception as e:
+                log("  topics failed:", e)
+                break
+            for a in data.get("assignments", []):
+                if 0 <= a.get("i", -1) < len(batch):
+                    assign[batch[a["i"]][0]] = (a.get("topic") or "通用").strip().replace("/", "·")[:12] or "通用"
+            log(f"topics {proj}: {min(k + 90, len(todo))}/{len(todo)}")
+        if todo:
+            TOPICS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TOPICS_FILE.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+        if todo or proj not in posted_topics:                   # once per run even when nothing is new: the hub may have missed it
+            try:
+                hub("POST", "/api/journey/topics", {"project": proj, "assign": assign})
+                posted_topics.add(proj)
+            except Exception as e:
+                log("  topics post failed:", e)
 
 
 # ---------------------------------------------------------------- git
@@ -921,6 +1007,7 @@ def main():
         scan()
         n = summarise(int(sys.argv[2]) if len(sys.argv) > 2 else None)
         log("summarised", n)
+        classify_topics()
         return
     import threading
 
@@ -940,11 +1027,12 @@ def main():
                 scan()
                 last_scan = time.time()
                 heartbeat(state="idle")
-            if time.time() - last_sum > 3600:
+            if time.time() - last_sum > 600:
                 last_sum = time.time()
                 heartbeat(state="summarising")
                 n = summarise()
                 log("summarised", n)
+                classify_topics()
                 heartbeat(state="idle", summarised=n)
         except Exception as e:
             log("loop error:", e)

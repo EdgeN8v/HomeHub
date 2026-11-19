@@ -24,6 +24,7 @@ from . import machines
 
 from .aclean import AcExtras
 from .comfort import Comfort
+from .heater_ctl import HeaterCtl
 from .ha import HA
 from .kitchen import Kitchen, TZ as KITCHEN_TZ
 from .energy import Energy
@@ -123,6 +124,7 @@ async def home_snapshot(request: web.Request):
     snap["order"] = {**store.get_setting("card_order", {}), **(store.get_setting(f"card_order:{phone}", {}) if phone else {})}
     snap["hidden"] = store.get_setting("hidden_devices", [])
     snap["comfort"] = request.app["comfort"].config()
+    snap["heater"] = request.app["heater"].snapshot()
     snap["ac_clean"] = request.app["acx"].clean_all()
     snap["kitchen_resv"] = request.app["kitchen"].reservations()
     snap["kitchen_recipes"] = request.app["kitchen"].recipes()
@@ -252,6 +254,16 @@ async def kitchen_recipe(request: web.Request):
     except (ValueError, TypeError) as e:
         raise web.HTTPBadRequest(text=str(e))
     return web.json_response({"ok": True, "kitchen_recipes": data})
+
+
+async def heater_set(request: web.Request):
+    """The wanted temperature of a baseboard heater (the hub keeps the room at it, measured by the room's thermometer)."""
+    body = await request.json()
+    try:
+        r = request.app["heater"].set_target(str(body.get("entity_id", "")), float(body.get("target")))
+    except (ValueError, TypeError) as e:
+        raise web.HTTPBadRequest(text=str(e))
+    return web.json_response({"ok": True, "heater": r})
 
 
 async def comfort_set(request: web.Request):
@@ -860,6 +872,8 @@ async def on_startup(app: web.Application):
     notifier = app["notifier"] = Notifier(store, lambda e: _entity_device_name(app, e))
     comfort = app["comfort"] = Comfort(home, store)
     app["comfort_task"] = asyncio.create_task(comfort.run())
+    heater = app["heater"] = HeaterCtl(home, store, comfort)
+    app["heater_task"] = asyncio.create_task(heater.run())
     acx = app["acx"] = AcExtras(ha, home, store)
     kitchen = app["kitchen"] = Kitchen(home, store)
     app["kitchen_task"] = asyncio.create_task(kitchen.run())
@@ -910,6 +924,7 @@ async def on_startup(app: web.Application):
 async def on_cleanup(app: web.Application):
     app["listener"].cancel()
     app["comfort_task"].cancel()
+    app["heater_task"].cancel()
     app["acx_task"].cancel()
     app["reader_task"].cancel()
     app["ble_task"].cancel()
@@ -969,6 +984,7 @@ def make_app() -> web.Application:
         web.post("/api/call", home_call),
         web.post("/api/order", save_order),
         web.post("/api/comfort", comfort_set),
+        web.post("/api/heater", heater_set),
         web.get("/api/ac/history", ac_history),
         web.post("/api/ac/clean", ac_clean),
         web.post("/api/kitchen/fryer", kitchen_fryer),
